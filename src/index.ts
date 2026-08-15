@@ -11079,6 +11079,70 @@ async function getHistoricalContextFeatureStatus(env:Env):Promise<Response>{
 }
 
 
+type ContextReplayJoinedRow={
+  backtest_dataset_row_id:number;board_date:string;pitcher_id:number;prop_line:number;model_edge:number|null;preferred_side:string|null;preferred_outcome:string|null;more_outcome:string|null;less_outcome:string|null;
+  weather_group:string|null;wind_direction_group:string|null;roof_type:string|null;is_roof_closed:number;day_night:string|null;temperature_f:number|null;home_plate_umpire_mlb_id:number|null;feature_quality_score:number|null;
+};
+type ContextSegStat={n:number;wins:number};
+function contextTempBand(v:unknown){const x=Number(v);if(!Number.isFinite(x))return 'UNKNOWN';if(x<=55)return '<=55';if(x<70)return '56-69';if(x<85)return '70-84';return '85+';}
+function contextBaselineHit(r:ContextReplayJoinedRow){const x=String(r.preferred_outcome??'').toUpperCase();return x==='WIN'?1:x==='LOSS'?0:null;}
+function contextOppositeSide(s:unknown){return String(s??'').toUpperCase()==='MORE'?'LESS':'MORE';}
+function contextOutcomeForSide(r:ContextReplayJoinedRow,side:string){const x=String(side==='MORE'?r.more_outcome:r.less_outcome).toUpperCase();return x==='WIN'?1:x==='LOSS'?0:null;}
+function contextAddStat(map:Map<string,ContextSegStat>,key:string,hit:number){const x=map.get(key)??{n:0,wins:0};x.n++;x.wins+=hit;map.set(key,x);}
+function contextSegmentKey(kind:string,r:ContextReplayJoinedRow){
+  if(kind==='day')return String(r.day_night??'UNKNOWN').toUpperCase();
+  if(kind==='roof')return r.is_roof_closed?'ROOF_CLOSED':String(r.roof_type??'UNKNOWN').toUpperCase();
+  if(kind==='weather')return String(r.weather_group??'UNKNOWN').toUpperCase();
+  if(kind==='wind')return String(r.wind_direction_group??'UNKNOWN').toUpperCase();
+  if(kind==='temp')return contextTempBand(r.temperature_f);
+  if(kind==='umpire')return r.home_plate_umpire_mlb_id==null?'UNKNOWN':String(r.home_plate_umpire_mlb_id);
+  return 'UNKNOWN';
+}
+function contextReplayEstimate(train:ContextReplayJoinedRow[],r:ContextReplayJoinedRow){
+  let globalN=0,globalWins=0;const kinds=['day','roof','weather','wind','temp','umpire'];const maps=new Map<string,Map<string,ContextSegStat>>();for(const k of kinds)maps.set(k,new Map());
+  for(const x of train){const hit=contextBaselineHit(x);if(hit==null)continue;globalN++;globalWins+=hit;for(const k of kinds){const key=contextSegmentKey(k,x);if(key!=='UNKNOWN')contextAddStat(maps.get(k)!,key,hit);}}
+  const global=globalN?globalWins/globalN:.5;let sumDelta=0,signals=0;const detail:any={};
+  for(const k of kinds){const key=contextSegmentKey(k,r),st=maps.get(k)!.get(key);if(!st)continue;const minN=k==='umpire'?8:20,shrink=k==='umpire'?25:40;if(st.n<minN)continue;const rate=st.wins/st.n,weight=st.n/(st.n+shrink),delta=(rate-global)*weight;sumDelta+=delta;signals++;detail[k]={key,n:st.n,hit_rate:rate,shrunk_delta:delta};}
+  const expected=Math.max(.30,Math.min(.70,global+(signals?sumDelta/signals:0)));
+  const confidence=signals>=2&&expected>=global+.035?'BOOST':signals>=2&&expected<=global-.035?'SUPPRESS':'NEUTRAL';
+  const flip=signals>=3&&expected<=.46;
+  return {globalN,global,expected,signals,confidence,flip,detail};
+}
+async function contextReplayDates(env:Env,runId:number){const r=(await env.DB.prepare(`SELECT DISTINCT test_date_min d FROM backtest_folds WHERE backtest_run_id=? AND status='EXECUTED' ORDER BY test_date_min`).bind(runId).all<{d:string}>()).results??[];return r.map(x=>String(x.d));}
+async function runContextReplayDate(request:Request,env:Env):Promise<Response>{
+  const body=await request.json<Record<string,unknown>>().catch(()=>({} as Record<string,unknown>));const ctx=await getContextBackfillContext(env);if(!ctx)return json({error:'No completed walk-forward-v2 run found.'},{status:404});
+  const ready=await env.DB.prepare(`SELECT COUNT(*) n FROM historical_context_features WHERE backtest_run_id=? AND feature_version='context-v1' AND feature_status='FEATURE_READY'`).bind(ctx.runId).first<{n:number}>();if(Number(ready?.n||0)<=0)return json({error:'Build 8.3 context features are not ready.'},{status:409});
+  let run=await env.DB.prepare(`SELECT * FROM context_challenger_replay_runs WHERE backtest_run_id=? AND backtest_dataset_build_id=? AND replay_version='context-challenger-replay-v1' ORDER BY context_replay_run_id DESC LIMIT 1`).bind(ctx.runId,ctx.buildId).first<Record<string,unknown>>();
+  if(!run){const x=await env.DB.prepare(`INSERT INTO context_challenger_replay_runs(run_uuid,backtest_run_id,backtest_dataset_build_id,replay_version,status,details_json) VALUES(?,?,?,'context-challenger-replay-v1','RUNNING',?)`).bind(crypto.randomUUID(),ctx.runId,ctx.buildId,JSON.stringify({anti_lookahead:'Only rows with board_date strictly before target date contribute to context segment history.',flip_rule:'flip only when >=3 qualifying prior-only context segments estimate baseline correctness <=46%',confidence_rule:'BOOST/SUPPRESS when >=2 segments shift expected correctness by >=3.5 percentage points versus prior global baseline'})).run();run={context_replay_run_id:Number(x.meta.last_row_id)};}
+  const runId=Number(run.context_replay_run_id),dates=await contextReplayDates(env,ctx.runId);let date=String(body.date??'');if(!date){const done=(await env.DB.prepare(`SELECT board_date FROM context_challenger_replay_dates WHERE context_replay_run_id=? AND status IN ('SKIPPED','EXECUTED')`).bind(runId).all<{board_date:string}>()).results??[];const ds=new Set(done.map(x=>String(x.board_date)));date=dates.find(d=>!ds.has(d))||'';}
+  if(!date){await env.DB.prepare(`UPDATE context_challenger_replay_runs SET status='SUCCEEDED',completed_at=CURRENT_TIMESTAMP,dates_completed=(SELECT COUNT(*) FROM context_challenger_replay_dates WHERE context_replay_run_id=? AND status='EXECUTED'),rows_scored=(SELECT COUNT(*) FROM context_challenger_replay_rows WHERE context_replay_run_id=?) WHERE context_replay_run_id=?`).bind(runId,runId,runId).run();return json({ok:true,done:true,context_replay_run_id:runId});}
+  const all=(await env.DB.prepare(`SELECT r.backtest_dataset_row_id,r.board_date,r.pitcher_id,r.prop_line,r.model_edge,r.preferred_side,r.preferred_outcome,r.more_outcome,r.less_outcome,f.weather_group,f.wind_direction_group,f.roof_type,f.is_roof_closed,f.day_night,f.temperature_f,f.home_plate_umpire_mlb_id,f.feature_quality_score FROM backtest_dataset_rows_v3 r JOIN historical_context_features f ON f.backtest_run_id=? AND f.backtest_dataset_row_id=r.backtest_dataset_row_id AND f.feature_version='context-v1' AND f.feature_status='FEATURE_READY' WHERE r.backtest_dataset_build_id=? AND r.backtest_eligible=1 AND r.more_outcome IN ('WIN','LOSS') AND r.board_date<=? ORDER BY r.board_date,r.backtest_dataset_row_id`).bind(ctx.runId,ctx.buildId,date).all<ContextReplayJoinedRow>()).results??[];
+  const train=all.filter(x=>String(x.board_date)<date);const fold=await env.DB.prepare(`SELECT backtest_fold_id FROM backtest_folds WHERE backtest_run_id=? AND status='EXECUTED' AND test_date_min=? LIMIT 1`).bind(ctx.runId,date).first<{backtest_fold_id:number}>();if(!fold)return json({error:'Executed fold not found.'},{status:404});
+  const testIds=(await env.DB.prepare(`SELECT backtest_dataset_row_id FROM backtest_fold_rows_v3 WHERE backtest_fold_id=? AND partition='TEST'`).bind(fold.backtest_fold_id).all<{backtest_dataset_row_id:number}>()).results??[];const idSet=new Set(testIds.map(x=>Number(x.backtest_dataset_row_id)));const tests=all.filter(x=>idSet.has(Number(x.backtest_dataset_row_id)));
+  if(train.length<80){await env.DB.prepare(`INSERT OR REPLACE INTO context_challenger_replay_dates(context_replay_run_id,board_date,status,train_rows,test_rows,details_json,completed_at) VALUES(?,?,'SKIPPED',?,?,?,CURRENT_TIMESTAMP)`).bind(runId,date,train.length,tests.length,JSON.stringify({reason:'need_80_prior_feature_ready_rows'})).run();return json({ok:true,date,status:'SKIPPED',train_rows:train.length,test_rows:tests.length});}
+  const stmts=[];let wins=0,losses=0,disagreements=0,improved=0,harmed=0,boost=0,suppress=0;
+  for(const r of tests){const e=contextReplayEstimate(train,r),baselineSide=String(r.preferred_side??'').toUpperCase(),challengerSide=e.flip?contextOppositeSide(baselineSide):baselineSide,baselineHit=contextBaselineHit(r),challengerHit=contextOutcomeForSide(r,challengerSide),disagreement=challengerSide!==baselineSide?1:0;if(challengerHit===1)wins++;else if(challengerHit===0)losses++;if(disagreement){disagreements++;if(challengerHit===1&&baselineHit===0)improved++;if(challengerHit===0&&baselineHit===1)harmed++;}if(e.confidence==='BOOST')boost++;if(e.confidence==='SUPPRESS')suppress++;
+    stmts.push(env.DB.prepare(`INSERT INTO context_challenger_replay_rows(context_replay_run_id,backtest_dataset_row_id,board_date,pitcher_id,prop_line,model_edge,baseline_side,baseline_hit,challenger_side,challenger_hit,disagreement,context_expected_baseline_hit,prior_global_hit_rate,context_signal_count,confidence_class,weather_group,wind_direction_group,roof_type,is_roof_closed,day_night,temperature_f,temperature_band,home_plate_umpire_mlb_id,feature_quality_score,details_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(context_replay_run_id,backtest_dataset_row_id) DO UPDATE SET baseline_side=excluded.baseline_side,baseline_hit=excluded.baseline_hit,challenger_side=excluded.challenger_side,challenger_hit=excluded.challenger_hit,disagreement=excluded.disagreement,context_expected_baseline_hit=excluded.context_expected_baseline_hit,prior_global_hit_rate=excluded.prior_global_hit_rate,context_signal_count=excluded.context_signal_count,confidence_class=excluded.confidence_class,details_json=excluded.details_json`).bind(runId,r.backtest_dataset_row_id,r.board_date,r.pitcher_id,r.prop_line,r.model_edge??null,baselineSide,baselineHit,challengerSide,challengerHit,disagreement,e.expected,e.global,e.signals,e.confidence,r.weather_group??null,r.wind_direction_group??null,r.roof_type??null,r.is_roof_closed||0,r.day_night??null,r.temperature_f??null,contextTempBand(r.temperature_f),r.home_plate_umpire_mlb_id??null,r.feature_quality_score??null,JSON.stringify({segment_history:e.detail,flip:e.flip,anti_lookahead:true})));
+  }
+  if(stmts.length)await env.DB.batch(stmts);
+  await env.DB.prepare(`INSERT OR REPLACE INTO context_challenger_replay_dates(context_replay_run_id,board_date,status,train_rows,test_rows,wins,losses,disagreements,improved,harmed,boost_rows,suppress_rows,details_json,completed_at) VALUES(?,?,'EXECUTED',?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`).bind(runId,date,train.length,tests.length,wins,losses,disagreements,improved,harmed,boost,suppress,JSON.stringify({rule_version:'prior-segment-correctness-v1'})).run();
+  return json({ok:true,date,status:'EXECUTED',train_rows:train.length,test_rows:tests.length,wins,losses,disagreements,improved,harmed,boost,suppress});
+}
+async function getContextChallengerReplay(env:Env):Promise<Response>{
+  const ctx=await getContextBackfillContext(env);if(!ctx)return json({release:'3.7',build:'8.4',run:null});const dates=await contextReplayDates(env,ctx.runId);const run=await env.DB.prepare(`SELECT * FROM context_challenger_replay_runs WHERE backtest_run_id=? AND backtest_dataset_build_id=? AND replay_version='context-challenger-replay-v1' ORDER BY context_replay_run_id DESC LIMIT 1`).bind(ctx.runId,ctx.buildId).first<Record<string,unknown>>();if(!run)return json({release:'3.7',build:'8.4',run:null,total_dates:dates.length,feature_ready:(await env.DB.prepare(`SELECT COUNT(*) n FROM historical_context_features WHERE backtest_run_id=? AND feature_version='context-v1' AND feature_status='FEATURE_READY'`).bind(ctx.runId).first<{n:number}>())?.n||0,research_only:true,production_models_changed:false});
+  const id=Number(run.context_replay_run_id);const summary=await env.DB.prepare(`SELECT COUNT(*) rows,SUM(baseline_hit) baseline_wins,SUM(CASE WHEN baseline_hit=0 THEN 1 ELSE 0 END) baseline_losses,SUM(challenger_hit) challenger_wins,SUM(CASE WHEN challenger_hit=0 THEN 1 ELSE 0 END) challenger_losses,SUM(disagreement) disagreements,SUM(CASE WHEN disagreement=1 AND challenger_hit=1 AND baseline_hit=0 THEN 1 ELSE 0 END) improved,SUM(CASE WHEN disagreement=1 AND challenger_hit=0 AND baseline_hit=1 THEN 1 ELSE 0 END) harmed,AVG(context_expected_baseline_hit) avg_expected_baseline_hit FROM context_challenger_replay_rows WHERE context_replay_run_id=?`).bind(id).first<Record<string,unknown>>();
+  const confidence=(await env.DB.prepare(`SELECT confidence_class bucket,COUNT(*) n,SUM(baseline_hit) wins,AVG(context_expected_baseline_hit) avg_expected FROM context_challenger_replay_rows WHERE context_replay_run_id=? GROUP BY confidence_class ORDER BY CASE confidence_class WHEN 'BOOST' THEN 1 WHEN 'NEUTRAL' THEN 2 ELSE 3 END`).bind(id).all<Record<string,unknown>>()).results??[];
+  const weather=(await env.DB.prepare(`SELECT weather_group bucket,COUNT(*) n,SUM(baseline_hit) wins FROM context_challenger_replay_rows WHERE context_replay_run_id=? GROUP BY weather_group ORDER BY n DESC`).bind(id).all<Record<string,unknown>>()).results??[];
+  const wind=(await env.DB.prepare(`SELECT wind_direction_group bucket,COUNT(*) n,SUM(baseline_hit) wins FROM context_challenger_replay_rows WHERE context_replay_run_id=? GROUP BY wind_direction_group ORDER BY n DESC`).bind(id).all<Record<string,unknown>>()).results??[];
+  const roof=(await env.DB.prepare(`SELECT CASE WHEN is_roof_closed=1 THEN 'ROOF_CLOSED' ELSE COALESCE(roof_type,'UNKNOWN') END bucket,COUNT(*) n,SUM(baseline_hit) wins FROM context_challenger_replay_rows WHERE context_replay_run_id=? GROUP BY bucket ORDER BY n DESC`).bind(id).all<Record<string,unknown>>()).results??[];
+  const dayNight=(await env.DB.prepare(`SELECT COALESCE(day_night,'UNKNOWN') bucket,COUNT(*) n,SUM(baseline_hit) wins FROM context_challenger_replay_rows WHERE context_replay_run_id=? GROUP BY bucket ORDER BY n DESC`).bind(id).all<Record<string,unknown>>()).results??[];
+  const temp=(await env.DB.prepare(`SELECT temperature_band bucket,COUNT(*) n,SUM(baseline_hit) wins FROM context_challenger_replay_rows WHERE context_replay_run_id=? GROUP BY temperature_band ORDER BY MIN(temperature_f)`).bind(id).all<Record<string,unknown>>()).results??[];
+  const umpires=(await env.DB.prepare(`SELECT COALESCE(f.home_plate_umpire_name,'Unknown') bucket,COUNT(*) n,SUM(r.baseline_hit) wins FROM context_challenger_replay_rows r JOIN historical_context_features f ON f.backtest_run_id=? AND f.backtest_dataset_row_id=r.backtest_dataset_row_id AND f.feature_version='context-v1' WHERE r.context_replay_run_id=? GROUP BY f.home_plate_umpire_mlb_id,f.home_plate_umpire_name HAVING COUNT(*)>=6 ORDER BY n DESC LIMIT 30`).bind(ctx.runId,id).all<Record<string,unknown>>()).results??[];
+  const done=(await env.DB.prepare(`SELECT board_date,status,train_rows,test_rows,wins,losses,disagreements,improved,harmed,boost_rows,suppress_rows FROM context_challenger_replay_dates WHERE context_replay_run_id=? ORDER BY board_date`).bind(id).all<Record<string,unknown>>()).results??[];const ds=new Set(done.map(x=>String(x.board_date)));const recent=(await env.DB.prepare(`SELECT r.*,p.canonical_name pitcher_name FROM context_challenger_replay_rows r JOIN pitchers p ON p.pitcher_id=r.pitcher_id WHERE r.context_replay_run_id=? ORDER BY r.board_date DESC,r.context_replay_row_id DESC LIMIT 80`).bind(id).all<Record<string,unknown>>()).results??[];
+  return json({release:'3.7',build:'8.4',replay_version:'context-challenger-replay-v1',run,summary,confidence,weather,wind,roof,day_night:dayNight,temperature:temp,umpires,recent,dates:done,total_dates:dates.length,next_date:dates.find(d=>!ds.has(d))||null,anti_lookahead:'Every context signal estimate uses only FEATURE_READY rows with board_date strictly before the target test date. Current-date outcomes never enter training.',research_only:true,production_models_changed:false});
+}
+
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -11163,6 +11227,9 @@ export default {
         "/context-features.html",
         "/context-features.js",
         "/context-features.css",
+        "/context-challenger.html",
+        "/context-challenger.js",
+        "/context-challenger.css",
         "/learned-challenger.html",
         "/learned-challenger.js",
         "/learned-challenger.css",
@@ -11417,6 +11484,8 @@ export default {
       if (url.pathname === "/api/context/backfill/run" && request.method === "POST") return runContextBackfillBatch(request, env);
       if (url.pathname === "/api/context/features" && request.method === "GET") return getHistoricalContextFeatureStatus(env);
       if (url.pathname === "/api/context/features/build" && request.method === "POST") return buildHistoricalContextFeatures(request, env);
+      if (url.pathname === "/api/context/challenger" && request.method === "GET") return getContextChallengerReplay(env);
+      if (url.pathname === "/api/context/challenger/run-date" && request.method === "POST") return runContextReplayDate(request, env);
       if (url.pathname === "/api/statcast/challenger" && request.method === "GET") return getStatcastChallengerReplay(env);
       if (url.pathname === "/api/statcast/challenger/run-date" && request.method === "POST") return runStatcastReplayDate(request, env);
       if (url.pathname === "/api/backtests/learned-challenger" && request.method === "GET") {
