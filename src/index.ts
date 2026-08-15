@@ -10996,6 +10996,89 @@ async function getContextBackfillStatus(env:Env):Promise<Response>{
 }
 
 
+type ContextFeatureRow={
+  context_certification_id:number;backtest_run_id:number;backtest_dataset_build_id:number;backtest_dataset_row_id:number;board_date:string;certification_status:string;cert_quality_score:number;weather_available:number;umpire_available:number;reasons_json:string;game_context_snapshot_id:number|null;mlb_game_pk:number|null;
+  venue_id:number|null;venue_name:string|null;day_night:string|null;temperature_f:number|null;weather_condition:string|null;wind_text:string|null;wind_speed_mph:number|null;humidity_pct:number|null;home_plate_umpire_mlb_id:number|null;home_plate_umpire_name:string|null;source_mode:string|null;details_json:string|null;
+};
+
+function contextWeatherGroup(condition:unknown):string{
+  const x=String(condition??'').toLowerCase();
+  if(!x)return 'UNKNOWN';
+  if(x.includes('roof closed'))return 'ROOF_CLOSED';
+  if(/rain|drizzle|shower|thunder|storm/.test(x))return 'WET';
+  if(/snow|sleet|ice/.test(x))return 'WINTER';
+  if(/clear|sunny/.test(x))return 'CLEAR';
+  if(/cloud|overcast/.test(x))return 'CLOUDY';
+  return 'OTHER';
+}
+function contextWindGroup(windText:unknown,windSpeed:unknown):string{
+  const x=String(windText??'').toLowerCase();const speed=Number(windSpeed);
+  if((Number.isFinite(speed)&&speed===0)||x.includes('calm')||x.includes('none'))return 'CALM';
+  if(x.includes('out to'))return 'OUT';
+  if(x.includes('in from'))return 'IN';
+  if(x.includes('l to r')||x.includes('r to l')||x.includes('cross'))return 'CROSS';
+  if(x.includes('varies')||x.includes('variable'))return 'VARIABLE';
+  return x?'OTHER':'UNKNOWN';
+}
+function contextFeaturePayload(r:ContextFeatureRow){
+  let d:any={};try{d=JSON.parse(String(r.details_json??'{}'));}catch{}
+  const roofType=String(d?.venue?.fieldInfo?.roofType??'')||null;
+  const weatherGroup=contextWeatherGroup(r.weather_condition);
+  const windGroup=contextWindGroup(r.wind_text,r.wind_speed_mph);
+  const isNight=String(r.day_night??'').toLowerCase()==='night'?1:0;
+  const isRoofClosed=weatherGroup==='ROOF_CLOSED'?1:0;
+  const temp=Number(r.temperature_f);const tempDelta=Number.isFinite(temp)?Math.round((temp-70)*1000)/1000:null;
+  const sourceCertified=String(r.certification_status)==='RECONSTRUCTED_CERTIFIED'&&r.game_context_snapshot_id!=null;
+  const featureStatus=sourceCertified?'FEATURE_READY':'SOURCE_EXCLUDED';
+  const quality=sourceCertified?Math.max(0,Math.min(100,Number(r.cert_quality_score)||0)):0;
+  const flags:string[]=[];
+  if(!sourceCertified)flags.push('source_not_reconstructed_certified');
+  if(sourceCertified&&!r.venue_name)flags.push('venue_missing');
+  if(sourceCertified&&!r.day_night)flags.push('day_night_missing');
+  if(sourceCertified&&!r.weather_available)flags.push('weather_missing');
+  if(sourceCertified&&!r.umpire_available)flags.push('umpire_missing');
+  const provenance={
+    class:'HISTORICAL_RETROSPECTIVE_RECONSTRUCTION',
+    promotion_eligible:false,
+    native_pregame_snapshot:false,
+    structural_fields:['venue_id','venue_name','day_night','roof_type'],
+    retrospective_observed_fields:['temperature_f','weather_condition','wind_text','wind_speed_mph'],
+    retrospective_pregame_known_fields:['home_plate_umpire_mlb_id','home_plate_umpire_name'],
+    postgame_outcomes_used:false
+  };
+  return {roofType,weatherGroup,windGroup,isNight,isRoofClosed,tempDelta,featureStatus,quality,flags,provenance};
+}
+
+async function buildHistoricalContextFeatures(request:Request,env:Env):Promise<Response>{
+  const ctx=await getContextBackfillContext(env);if(!ctx)return json({error:'No completed walk-forward-v2 run found.'},{status:404});
+  const body=await request.json<Record<string,unknown>>().catch(()=>({} as Record<string,unknown>));
+  const limit=Math.max(1,Math.min(100,Number(body.limit??80)));
+  const rows=(await env.DB.prepare(`SELECT c.context_certification_id,c.backtest_run_id,c.backtest_dataset_build_id,c.backtest_dataset_row_id,c.board_date,c.certification_status,c.quality_score cert_quality_score,c.weather_available,c.umpire_available,c.reasons_json,c.game_context_snapshot_id,c.mlb_game_pk,s.venue_id,s.venue_name,s.day_night,s.temperature_f,s.weather_condition,s.wind_text,s.wind_speed_mph,s.humidity_pct,s.home_plate_umpire_mlb_id,s.home_plate_umpire_name,s.source_mode,s.details_json FROM game_context_backfill_certifications c LEFT JOIN game_context_snapshots s ON s.game_context_snapshot_id=c.game_context_snapshot_id WHERE c.backtest_run_id=? AND NOT EXISTS(SELECT 1 FROM historical_context_features f WHERE f.backtest_run_id=c.backtest_run_id AND f.backtest_dataset_row_id=c.backtest_dataset_row_id AND f.feature_version='context-v1') ORDER BY c.board_date,c.context_certification_id LIMIT ?`).bind(ctx.runId,limit).all<ContextFeatureRow>()).results??[];
+  if(!rows.length){
+    await env.DB.prepare(`INSERT INTO data_source_status(source_name,dataset_name,status,last_attempt_at,last_success_at,last_complete_through_at,expected_refresh_minutes,stale_after_minutes,consecutive_failures,record_count,status_message,metadata_json,updated_at) VALUES('FEATURE_STORE','HISTORICAL_CONTEXT_FEATURES','HEALTHY',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?,1440,10080,0,(SELECT COUNT(*) FROM historical_context_features WHERE feature_version='context-v1'),'Build 8.3 context feature engineering complete.',?,CURRENT_TIMESTAMP) ON CONFLICT(source_name,dataset_name) DO UPDATE SET status='HEALTHY',last_attempt_at=CURRENT_TIMESTAMP,last_success_at=CURRENT_TIMESTAMP,last_complete_through_at=excluded.last_complete_through_at,record_count=excluded.record_count,status_message=excluded.status_message,metadata_json=excluded.metadata_json,updated_at=CURRENT_TIMESTAMP`).bind(ctx.dates.at(-1)??null,JSON.stringify({backtest_run_id:ctx.runId,feature_version:'context-v1',research_only:true})).run();
+    return json({release:'3.7',build:'8.3',feature_version:'context-v1',processed:0,done:true,production_models_changed:false});
+  }
+  const stmts=[];let ready=0,excluded=0;
+  for(const r of rows){
+    const f=contextFeaturePayload(r);if(f.featureStatus==='FEATURE_READY')ready++;else excluded++;
+    stmts.push(env.DB.prepare(`INSERT INTO historical_context_features(backtest_run_id,backtest_dataset_build_id,backtest_dataset_row_id,board_date,context_certification_id,game_context_snapshot_id,mlb_game_pk,feature_version,feature_status,venue_id,venue_name,roof_type,day_night,is_night,temperature_f,temperature_delta_70,weather_condition,weather_group,wind_text,wind_speed_mph,wind_direction_group,is_roof_closed,home_plate_umpire_mlb_id,home_plate_umpire_name,source_quality_score,feature_quality_score,promotion_eligible,provenance_class,quality_flags_json,feature_json,generated_at) VALUES(?,?,?,?,?,?,?,'context-v1',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'HISTORICAL_RETROSPECTIVE_RECONSTRUCTION',?,?,CURRENT_TIMESTAMP) ON CONFLICT(backtest_run_id,backtest_dataset_row_id,feature_version) DO UPDATE SET context_certification_id=excluded.context_certification_id,game_context_snapshot_id=excluded.game_context_snapshot_id,mlb_game_pk=excluded.mlb_game_pk,feature_status=excluded.feature_status,venue_id=excluded.venue_id,venue_name=excluded.venue_name,roof_type=excluded.roof_type,day_night=excluded.day_night,is_night=excluded.is_night,temperature_f=excluded.temperature_f,temperature_delta_70=excluded.temperature_delta_70,weather_condition=excluded.weather_condition,weather_group=excluded.weather_group,wind_text=excluded.wind_text,wind_speed_mph=excluded.wind_speed_mph,wind_direction_group=excluded.wind_direction_group,is_roof_closed=excluded.is_roof_closed,home_plate_umpire_mlb_id=excluded.home_plate_umpire_mlb_id,home_plate_umpire_name=excluded.home_plate_umpire_name,source_quality_score=excluded.source_quality_score,feature_quality_score=excluded.feature_quality_score,promotion_eligible=0,provenance_class=excluded.provenance_class,quality_flags_json=excluded.quality_flags_json,feature_json=excluded.feature_json,generated_at=CURRENT_TIMESTAMP`).bind(ctx.runId,ctx.buildId,r.backtest_dataset_row_id,r.board_date,r.context_certification_id,r.game_context_snapshot_id??null,r.mlb_game_pk??null,f.featureStatus,r.venue_id??null,r.venue_name??null,f.roofType,r.day_night??null,f.isNight,r.temperature_f??null,f.tempDelta,r.weather_condition??null,f.weatherGroup,r.wind_text??null,r.wind_speed_mph??null,f.windGroup,f.isRoofClosed,r.home_plate_umpire_mlb_id??null,r.home_plate_umpire_name??null,Number(r.cert_quality_score)||0,f.quality,JSON.stringify(f.flags),JSON.stringify({feature_version:'context-v1',source_certification_status:r.certification_status,source_reasons:r.reasons_json,roof_type:f.roofType,weather_group:f.weatherGroup,wind_direction_group:f.windGroup,temperature_delta_70:f.tempDelta,provenance:f.provenance,raw:{venue_id:r.venue_id,venue_name:r.venue_name,day_night:r.day_night,temperature_f:r.temperature_f,weather_condition:r.weather_condition,wind_text:r.wind_text,wind_speed_mph:r.wind_speed_mph,home_plate_umpire_mlb_id:r.home_plate_umpire_mlb_id,home_plate_umpire_name:r.home_plate_umpire_name}})));
+  }
+  await env.DB.batch(stmts);
+  const left=await env.DB.prepare(`SELECT COUNT(*) n FROM game_context_backfill_certifications c WHERE c.backtest_run_id=? AND NOT EXISTS(SELECT 1 FROM historical_context_features f WHERE f.backtest_run_id=c.backtest_run_id AND f.backtest_dataset_row_id=c.backtest_dataset_row_id AND f.feature_version='context-v1')`).bind(ctx.runId).first<{n:number}>();
+  return json({release:'3.7',build:'8.3',feature_version:'context-v1',processed:rows.length,ready,excluded,remaining:Number(left?.n??0),done:Number(left?.n??0)===0,production_models_changed:false});
+}
+
+async function getHistoricalContextFeatureStatus(env:Env):Promise<Response>{
+  const ctx=await getContextBackfillContext(env);if(!ctx)return json({release:'3.7',build:'8.3',message:'No completed walk-forward-v2 run found.',production_models_changed:false});
+  const source=await env.DB.prepare(`SELECT COUNT(*) rows,SUM(CASE WHEN certification_status='RECONSTRUCTED_CERTIFIED' THEN 1 ELSE 0 END) certified,SUM(CASE WHEN certification_status='EXCLUDED' THEN 1 ELSE 0 END) excluded FROM game_context_backfill_certifications WHERE backtest_run_id=?`).bind(ctx.runId).first<Record<string,unknown>>();
+  const built=await env.DB.prepare(`SELECT COUNT(*) rows,SUM(CASE WHEN feature_status='FEATURE_READY' THEN 1 ELSE 0 END) ready,SUM(CASE WHEN feature_status='SOURCE_EXCLUDED' THEN 1 ELSE 0 END) excluded,COUNT(DISTINCT board_date) dates,AVG(CASE WHEN feature_status='FEATURE_READY' THEN feature_quality_score END) avg_ready_quality,SUM(CASE WHEN feature_status='FEATURE_READY' AND weather_group!='UNKNOWN' THEN 1 ELSE 0 END) weather_classified,SUM(CASE WHEN feature_status='FEATURE_READY' AND wind_direction_group!='UNKNOWN' THEN 1 ELSE 0 END) wind_classified,SUM(CASE WHEN feature_status='FEATURE_READY' AND home_plate_umpire_mlb_id IS NOT NULL THEN 1 ELSE 0 END) umpire_identified FROM historical_context_features WHERE backtest_run_id=? AND feature_version='context-v1'`).bind(ctx.runId).first<Record<string,unknown>>();
+  const total=Number(source?.rows??0),rows=Number(built?.rows??0);
+  const recent=(await env.DB.prepare(`SELECT board_date,backtest_dataset_row_id,feature_status,venue_name,roof_type,day_night,temperature_f,weather_group,wind_direction_group,home_plate_umpire_name,feature_quality_score,quality_flags_json FROM historical_context_features WHERE backtest_run_id=? AND feature_version='context-v1' ORDER BY board_date DESC,context_feature_id DESC LIMIT 50`).bind(ctx.runId).all<Record<string,unknown>>()).results??[];
+  const buckets=(await env.DB.prepare(`SELECT weather_group,COUNT(*) n FROM historical_context_features WHERE backtest_run_id=? AND feature_version='context-v1' AND feature_status='FEATURE_READY' GROUP BY weather_group ORDER BY n DESC`).bind(ctx.runId).all<Record<string,unknown>>()).results??[];
+  return json({release:'3.7',build:'8.3',feature_version:'context-v1',backtest_run_id:ctx.runId,dataset_build_id:ctx.buildId,source:{rows:total,certified:Number(source?.certified??0),excluded:Number(source?.excluded??0)},features:{rows,ready:Number(built?.ready??0),excluded:Number(built?.excluded??0),dates:Number(built?.dates??0),avg_ready_quality:built?.avg_ready_quality==null?null:Number(built.avg_ready_quality),weather_classified:Number(built?.weather_classified??0),wind_classified:Number(built?.wind_classified??0),umpire_identified:Number(built?.umpire_identified??0),remaining:Math.max(0,total-rows)},weather_buckets:buckets,recent,done:total>0&&rows>=total,research_only:true,provenance:'Historical retrospective context features. Structural fields are separated from retrospective observed weather/wind and retrospectively sourced umpire identity. No outcome-derived context features.',production_models_changed:false});
+}
+
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -11077,6 +11160,9 @@ export default {
         "/context-backfill.html",
         "/context-backfill.js",
         "/context-backfill.css",
+        "/context-features.html",
+        "/context-features.js",
+        "/context-features.css",
         "/learned-challenger.html",
         "/learned-challenger.js",
         "/learned-challenger.css",
@@ -11329,6 +11415,8 @@ export default {
       if (url.pathname === "/api/context/game/sync" && request.method === "POST") return syncGameContextDate(request, env);
       if (url.pathname === "/api/context/backfill" && request.method === "GET") return getContextBackfillStatus(env);
       if (url.pathname === "/api/context/backfill/run" && request.method === "POST") return runContextBackfillBatch(request, env);
+      if (url.pathname === "/api/context/features" && request.method === "GET") return getHistoricalContextFeatureStatus(env);
+      if (url.pathname === "/api/context/features/build" && request.method === "POST") return buildHistoricalContextFeatures(request, env);
       if (url.pathname === "/api/statcast/challenger" && request.method === "GET") return getStatcastChallengerReplay(env);
       if (url.pathname === "/api/statcast/challenger/run-date" && request.method === "POST") return runStatcastReplayDate(request, env);
       if (url.pathname === "/api/backtests/learned-challenger" && request.method === "GET") {
