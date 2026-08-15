@@ -11143,6 +11143,82 @@ async function getContextChallengerReplay(env:Env):Promise<Response>{
 }
 
 
+type PromotionPolicyRow = {
+  promotion_policy_id:number;
+  policy_name:string;
+  status:string;
+  candidate_version_name:string;
+  min_historical_paired_rows:number;
+  min_live_graded_pairs:number;
+  min_live_distinct_dates:number;
+  min_live_hit_delta:number;
+  max_live_brier_delta:number;
+  max_abs_live_calibration_gap:number;
+  require_zero_runtime_failures:number;
+  require_manual_approval:number;
+  config_json:string|null;
+};
+
+function promotionRate(wins:number, rows:number):number|null { return rows > 0 ? wins / rows : null; }
+
+async function collectPromotionReadiness(env:Env){
+  const policy=await env.DB.prepare(`SELECT * FROM promotion_policies WHERE status='ACTIVE' ORDER BY promotion_policy_id DESC LIMIT 1`).first<PromotionPolicyRow>();
+  if(!policy) return {policy:null,status:'NO_ACTIVE_POLICY',production:null,candidate:null,historical:null,live:null,gates:[]};
+  const production=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,execution_enabled,last_execution_status,last_execution_error FROM model_versions WHERE model_role='PRODUCTION' AND lifecycle_status='ACTIVE' ORDER BY model_version_id DESC LIMIT 1`).first<Record<string,unknown>>();
+  const candidate=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,execution_enabled,last_execution_status,last_execution_error FROM model_versions WHERE version_name=? ORDER BY model_version_id DESC LIMIT 1`).bind(policy.candidate_version_name).first<Record<string,unknown>>();
+  if(!production||!candidate) return {policy,status:'MODEL_MISSING',production,candidate,historical:null,live:null,gates:[]};
+  const latestRun=await env.DB.prepare(`SELECT backtest_run_id,backtest_dataset_build_id,engine_version,status,started_at,completed_at FROM backtest_runs WHERE engine_version='walk-forward-v2' AND status IN ('SUCCEEDED','PARTIAL') ORDER BY backtest_run_id DESC LIMIT 1`).first<Record<string,unknown>>();
+  let historicalRows=0, historicalDates=0;
+  if(latestRun){
+    const h=await env.DB.prepare(`SELECT COUNT(DISTINCT r.backtest_dataset_row_id) rows,COUNT(DISTINCT r.board_date) dates FROM backtest_folds f JOIN backtest_fold_rows_v3 fr ON fr.backtest_fold_id=f.backtest_fold_id AND fr.partition='TEST' JOIN backtest_dataset_rows_v3 r ON r.backtest_dataset_row_id=fr.backtest_dataset_row_id WHERE f.backtest_run_id=? AND f.status='EXECUTED' AND UPPER(COALESCE(r.preferred_outcome,'')) IN ('WIN','LOSS')`).bind(Number(latestRun.backtest_run_id)).first<{rows:number;dates:number}>();
+    historicalRows=Number(h?.rows??0); historicalDates=Number(h?.dates??0);
+  }
+  const prodId=Number(production.model_version_id), candId=Number(candidate.model_version_id);
+  const liveRows=(await env.DB.prepare(`
+    SELECT b.board_date,pr.result,
+      p13.preferred_side v13_side,CASE WHEN UPPER(p13.preferred_side)='MORE' THEN COALESCE(p13.calibrated_more_probability,p13.raw_more_probability) ELSE COALESCE(p13.calibrated_less_probability,p13.raw_less_probability) END v13_probability,
+      p14.preferred_side v14_side,CASE WHEN UPPER(p14.preferred_side)='MORE' THEN COALESCE(p14.calibrated_more_probability,p14.raw_more_probability) ELSE COALESCE(p14.calibrated_less_probability,p14.raw_less_probability) END v14_probability
+    FROM props p JOIN boards b ON b.board_id=p.board_id
+    JOIN model_predictions p13 ON p13.model_prediction_id=(SELECT x.model_prediction_id FROM model_predictions x WHERE x.prop_id=p.prop_id AND x.model_version_id=? AND x.prediction_mode='PRODUCTION' AND x.prediction_status='COMPLETE' ORDER BY x.model_prediction_id DESC LIMIT 1)
+    JOIN model_predictions p14 ON p14.model_prediction_id=(SELECT x.model_prediction_id FROM model_predictions x WHERE x.prop_id=p.prop_id AND x.model_version_id=? AND x.prediction_mode='SHADOW' AND x.prediction_status='COMPLETE' ORDER BY x.model_prediction_id DESC LIMIT 1)
+    LEFT JOIN prop_results pr ON pr.prop_id=p.prop_id AND pr.result_status<>'PENDING'
+    ORDER BY b.board_date,p.prop_id
+  `).bind(prodId,candId).all<Record<string,unknown>>()).results??[];
+  const graded=liveRows.filter(r=>['OVER','UNDER'].includes(String(r.result??'').toUpperCase()));
+  const calc=(sideKey:string,probKey:string)=>{let wins=0,brier=0,probSum=0,n=0;for(const r of graded){const side=String(r[sideKey]??'').toUpperCase(),result=String(r.result??'').toUpperCase();if(side!=='MORE'&&side!=='LESS')continue;const y=((side==='MORE'&&result==='OVER')||(side==='LESS'&&result==='UNDER'))?1:0;const p=Math.max(0,Math.min(1,Number(r[probKey]??0.5)));wins+=y;brier+=(p-y)*(p-y);probSum+=p;n++;}const hit=promotionRate(wins,n),avg=n?probSum/n:null;return {rows:n,wins,losses:n-wins,hit_rate:hit,brier:n?brier/n:null,avg_probability:avg,calibration_gap:hit!=null&&avg!=null?avg-hit:null};};
+  const v13=calc('v13_side','v13_probability'), v14=calc('v14_side','v14_probability');
+  const liveDates=new Set(graded.map(r=>String(r.board_date??'').slice(0,10)).filter(Boolean)).size;
+  const failures=await env.DB.prepare(`SELECT COUNT(*) n FROM model_predictions WHERE model_version_id=? AND prediction_mode='SHADOW' AND prediction_status='FAILED'`).bind(candId).first<{n:number}>();
+  const hitDelta=v13.hit_rate!=null&&v14.hit_rate!=null?v14.hit_rate-v13.hit_rate:null;
+  const brierDelta=v13.brier!=null&&v14.brier!=null?v14.brier-v13.brier:null;
+  const absCalGap=v14.calibration_gap==null?null:Math.abs(v14.calibration_gap);
+  const gates=[
+    {key:'historical_sample',label:'Historical paired rows',value:historicalRows,threshold:policy.min_historical_paired_rows,pass:historicalRows>=policy.min_historical_paired_rows},
+    {key:'candidate_enabled',label:'Candidate shadow enabled',value:Number(candidate.execution_enabled??0),threshold:1,pass:Number(candidate.execution_enabled??0)===1},
+    {key:'runtime_failures',label:'Shadow runtime failures',value:Number(failures?.n??0),threshold:0,pass:policy.require_zero_runtime_failures?Number(failures?.n??0)===0:true},
+    {key:'live_sample',label:'Live graded pairs',value:graded.length,threshold:policy.min_live_graded_pairs,pass:graded.length>=policy.min_live_graded_pairs},
+    {key:'live_dates',label:'Live distinct dates',value:liveDates,threshold:policy.min_live_distinct_dates,pass:liveDates>=policy.min_live_distinct_dates},
+    {key:'live_hit_delta',label:'v14 − v13 live hit',value:hitDelta,threshold:policy.min_live_hit_delta,pass:hitDelta!=null&&hitDelta>=policy.min_live_hit_delta,requires_sample:true},
+    {key:'live_brier_delta',label:'v14 − v13 live Brier',value:brierDelta,threshold:policy.max_live_brier_delta,pass:brierDelta!=null&&brierDelta<=policy.max_live_brier_delta,requires_sample:true},
+    {key:'live_calibration_gap',label:'Absolute v14 live calibration gap',value:absCalGap,threshold:policy.max_abs_live_calibration_gap,pass:absCalGap!=null&&absCalGap<=policy.max_abs_live_calibration_gap,requires_sample:true},
+  ].map(g=>({...g,evaluable:!g.requires_sample||(graded.length>=policy.min_live_graded_pairs&&liveDates>=policy.min_live_distinct_dates)}));
+  const evaluated=gates.filter(g=>g.evaluable); const technicalReady=evaluated.length===gates.length&&evaluated.every(g=>g.pass);
+  return {policy,status:technicalReady?'TECHNICALLY_READY':'OBSERVATION',production,candidate,historical:{run:latestRun,paired_rows:historicalRows,distinct_dates:historicalDates},live:{paired_predictions:liveRows.length,graded_pairs:graded.length,distinct_dates:liveDates,v13,v14,hit_delta:hitDelta,brier_delta:brierDelta,abs_v14_calibration_gap:absCalGap,runtime_failures:Number(failures?.n??0)},gates,technical_ready:technicalReady,manual_approval_required:Boolean(policy.require_manual_approval),promotion_enabled:false};
+}
+
+async function getPromotionReadiness(env:Env):Promise<Response>{
+  return json({release:'3.8',build:'9.1',governance_version:'promotion-gate-v1',...(await collectPromotionReadiness(env)),note:'Build 9.1 is observation-only. It cannot promote, demote, or change model roles.'});
+}
+
+async function capturePromotionReadiness(env:Env,identity:AccessIdentity):Promise<Response>{
+  const data:any=await collectPromotionReadiness(env); if(!data.policy||!data.production||!data.candidate)return json({error:'Promotion readiness cannot be captured until the active policy and both models exist.'},{status:409});
+  const gateStatus=data.technical_ready?'TECHNICALLY_READY':'OBSERVATION';
+  const ins=await env.DB.prepare(`INSERT INTO promotion_readiness_snapshots(snapshot_uuid,promotion_policy_id,production_model_version_id,candidate_model_version_id,gate_status,historical_paired_rows,historical_distinct_dates,live_paired_predictions,live_graded_pairs,live_distinct_dates,production_live_hit_rate,candidate_live_hit_rate,live_hit_delta,production_live_brier,candidate_live_brier,live_brier_delta,candidate_abs_calibration_gap,candidate_runtime_failures,gates_json,evidence_json,captured_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),data.policy.promotion_policy_id,data.production.model_version_id,data.candidate.model_version_id,gateStatus,data.historical?.paired_rows??0,data.historical?.distinct_dates??0,data.live?.paired_predictions??0,data.live?.graded_pairs??0,data.live?.distinct_dates??0,data.live?.v13?.hit_rate??null,data.live?.v14?.hit_rate??null,data.live?.hit_delta??null,data.live?.v13?.brier??null,data.live?.v14?.brier??null,data.live?.brier_delta??null,data.live?.abs_v14_calibration_gap??null,data.live?.runtime_failures??0,JSON.stringify(data.gates),JSON.stringify({governance_version:'promotion-gate-v1',historical:data.historical,live:data.live,technical_ready:data.technical_ready,promotion_enabled:false}),identity.email??identity.subject??'unknown').run();
+  await audit(env,identity,'PROMOTION_READINESS_SNAPSHOT_CAPTURED','MODEL_VERSION',Number(data.candidate.model_version_id),{promotion_readiness_snapshot_id:Number(ins.meta.last_row_id),gate_status:gateStatus,promotion_enabled:false});
+  return json({ok:true,promotion_readiness_snapshot_id:Number(ins.meta.last_row_id),gate_status:gateStatus,promotion_enabled:false});
+}
+
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -11161,6 +11237,9 @@ export default {
         "/model-control.html",
         "/model-control.js",
         "/model-control.css",
+        "/promotion-readiness.html",
+        "/promotion-readiness.js",
+        "/promotion-readiness.css",
         "/schedule-sync.html",
         "/schedule-sync.js",
         "/schedule-sync.css",
@@ -11338,6 +11417,13 @@ export default {
       const modelRuntimeMatch = url.pathname.match(/^\/api\/models\/(\d+)\/runtime$/);
       if (modelRuntimeMatch && request.method === "PATCH") {
         return updateModelRuntime(request, env, identity!, Number(modelRuntimeMatch[1]));
+      }
+
+      if (url.pathname === "/api/models/promotion/readiness" && request.method === "GET") {
+        return getPromotionReadiness(env);
+      }
+      if (url.pathname === "/api/models/promotion/readiness-snapshot" && request.method === "POST") {
+        return capturePromotionReadiness(env, identity!);
       }
 
       if (url.pathname === "/api/data-sources/health" && request.method === "GET") {
