@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pitcher History — K-Prop Demon Hunters</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/pitcher-history.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MLB K-PROP PLATFORM</p>
+      <h1>Pitcher History</h1>
+    </div>
+    <nav class="history-nav">
+      <a class="topbar-button" href="/">Daily Board</a>
+      <a class="topbar-button" href="/board-editor.html">Board Editor</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="history-hero">
+      <div>
+        <span class="label">Historical prop explorer</span>
+        <h2 id="pitcher-heading">Select a pitcher</h2>
+        <p id="pitcher-meta">Browse imported and current K-prop history.</p>
+      </div>
+      <label class="pitcher-picker">
+        Pitcher
+        <input id="pitcher-search" type="search" placeholder="Filter pitchers">
+        <select id="pitcher-select">
+          <option value="">Loading pitchers…</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="summary-grid history-summary" aria-label="Pitcher history summary">
+      <article><span>Total props</span><strong id="summary-props">—</strong></article>
+      <article><span>Verified</span><strong id="summary-verified">—</strong></article>
+      <article><span>W-L-P</span><strong id="summary-record">—</strong></article>
+      <article><span>Win rate</span><strong id="summary-win-rate">—</strong></article>
+      <article><span>Unresolved</span><strong id="summary-unresolved">—</strong></article>
+    </section>
+
+    <section class="controls history-controls">
+      <label>
+        Result
+        <select id="result-filter">
+          <option value="">All</option>
+          <option value="WIN">Win</option>
+          <option value="LOSS">Loss</option>
+          <option value="PUSH">Push</option>
+          <option value="VOID">Void</option>
+          <option value="UNRESOLVED">Unresolved</option>
+          <option value="NO_DIRECTION">No stored direction</option>
+        </select>
+      </label>
+      <label>
+        Source
+        <select id="source-filter">
+          <option value="">All sources</option>
+          <option value="historical_chat_import_v2">Historical import</option>
+        </select>
+      </label>
+      <button id="refresh-history" type="button">Refresh</button>
+    </section>
+
+    <section class="table-card">
+      <div id="history-error" class="error hidden"></div>
+      <div class="table-scroll">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Opponent</th>
+              <th>Line</th>
+              <th>Side</th>
+              <th>Decision</th>
+              <th>Actual Ks</th>
+              <th>Market result</th>
+              <th>Recommendation result</th>
+              <th>Type</th>
+              <th>Source</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="history-body">
+            <tr><td colspan="11" class="loading">Select a pitcher to view history.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/pitcher-history.js" defer></script>
+</body>
+</html>

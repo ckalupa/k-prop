@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MLB K-Prop Tracker</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MLB K-PROP PLATFORM</p>
+      <h1>Daily Board</h1>
+    </div>
+    <div class="status-wrap">
+      <span id="api-status" class="status">Checking API…</span>
+      <button id="refresh-button" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="board-banner">
+      <div>
+        <span class="label">Current board</span>
+        <strong id="board-name">Loading…</strong>
+      </div>
+      <div>
+        <span class="label">Date</span>
+        <strong id="board-date">—</strong>
+      </div>
+      <div>
+        <span class="label">Status</span>
+        <strong id="board-status">—</strong>
+      </div>
+    </section>
+
+    <section id="summary-cards" class="summary-grid" aria-label="Board summary">
+      <article><span>Total props</span><strong id="count-props">—</strong></article>
+      <article><span>Plays</span><strong id="count-plays">—</strong></article>
+      <article><span>Leans</span><strong id="count-leans">—</strong></article>
+      <article><span>Watches</span><strong id="count-watches">—</strong></article>
+      <article><span>Passes</span><strong id="count-passes">—</strong></article>
+    </section>
+
+    <section class="controls">
+      <label>
+        Search
+        <input id="search" type="search" placeholder="Pitcher or opponent">
+      </label>
+
+      <label>
+        Decision
+        <select id="decision-filter">
+          <option value="">All</option>
+          <option value="PLAY">Play</option>
+          <option value="LEAN">Lean</option>
+          <option value="WATCH">Watch</option>
+          <option value="PASS">Pass</option>
+          <option value="AUTO PASS">Auto Pass</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="table-card">
+      <div id="error-box" class="error hidden"></div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Pitcher</th>
+              <th>Opp</th>
+              <th>Line</th>
+              <th>Projection</th>
+              <th>Edge</th>
+              <th>Over %</th>
+              <th>Side</th>
+              <th>Confidence</th>
+              <th>Tier</th>
+              <th>Decision</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="board-body">
+            <tr><td colspan="11" class="loading">Loading board…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

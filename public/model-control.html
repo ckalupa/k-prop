@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Model Control — MLB K-Prop Tracker</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/model-control.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MLB K-PROP PLATFORM</p>
+      <h1>Model Control</h1>
+    </div>
+    <nav class="model-nav">
+      <a href="/">Dashboard</a>
+      <a href="/board-editor.html">Board Editor</a>
+      <a href="/plays.html">Plays</a>
+      <a href="/model-comparison.html">v13 vs v14</a>
+      <span id="identity">Loading identity…</span>
+    <a href="/schedule-sync.html">Schedule Sync</a>
+</nav>
+  <a href="/team-split-sync.html">Team Splits</a><a href="/pitcher-features.html">Pitcher Features</a><a href="/team-features.html">Team Features</a></header>
+
+  <main class="model-main">
+    <section class="summary-grid" id="summary-grid" aria-live="polite"></section>
+
+    <section class="control-card">
+      <div class="section-heading">
+        <div>
+          <h2>Registered models</h2>
+          <p>Production remains protected. Challenger execution can be enabled or disabled independently.</p>
+        </div>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+      <p id="message" class="message"></p>
+      <div id="models" class="models"></div>
+    </section>
+  </main>
+  <script src="/model-control.js" defer></script>
+</body>
+</html>

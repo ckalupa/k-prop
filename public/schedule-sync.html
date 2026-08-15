@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MLB Schedule Sync</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/schedule-sync.css">
+</head>
+<body>
+  <header class="topbar">
+    <a href="/board-editor.html">Board Editor</a>
+    <a href="/plays.html">Plays</a>
+    <a href="/model-control.html">Model Control</a><a href="/sync-health.html">Sync Health</a>
+    <strong>Schedule Sync</strong>
+  <a href="/team-split-sync.html">Team Splits</a><a href="/pitcher-features.html">Pitcher Features</a><a href="/team-features.html">Team Features</a><a href="/lineup-sync.html">Lineups</a></header>
+  <main class="sync-shell">
+    <section class="hero-card">
+      <div>
+        <p class="eyebrow">Release 3.1 · Build 2.1</p>
+        <h1>MLB Schedule & Game Sync</h1>
+        <p>Controlled ingestion of game IDs, teams, probable starters, statuses, start times, and final scores.</p>
+      </div>
+      <button id="run-sync" type="button">Sync now</button>
+    </section>
+    <section class="status-grid" id="status-grid"></section>
+    <section class="panel">
+      <div class="panel-heading"><h2>Recent sync runs</h2><button id="refresh" type="button" class="secondary">Refresh</button></div>
+      <div class="table-wrap"><table><thead><tr><th>Run</th><th>Status</th><th>Trigger</th><th>Started</th><th>Read</th><th>Inserted</th><th>Updated</th><th>Rejected</th></tr></thead><tbody id="runs"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-heading"><h2>Recent games</h2><input id="game-date" type="date"></div>
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>Matchup</th><th>Start</th><th>Status</th><th>Probable starters</th><th>Score</th><th>Last sync</th></tr></thead><tbody id="games"></tbody></table></div>
+    </section>
+    <p id="message" role="status"></p>
+  </main>
+  <script src="/schedule-sync.js" defer></script>
+</body>
+</html>

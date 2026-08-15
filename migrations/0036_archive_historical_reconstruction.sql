@@ -1,0 +1,78 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS archive_historical_reconstruction_runs (
+  archive_reconstruction_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_uuid TEXT NOT NULL UNIQUE,
+  reconstruction_version TEXT NOT NULL DEFAULT 'archive-reconstruction-v1',
+  status TEXT NOT NULL DEFAULT 'RUNNING',
+  trigger_source TEXT NOT NULL DEFAULT 'ADMIN',
+  cursor_start_archive_prop_id INTEGER NOT NULL DEFAULT 0,
+  cursor_end_archive_prop_id INTEGER NOT NULL DEFAULT 0,
+  candidates_seen INTEGER NOT NULL DEFAULT 0,
+  rows_inserted INTEGER NOT NULL DEFAULT 0,
+  research_ready_count INTEGER NOT NULL DEFAULT 0,
+  incomplete_count INTEGER NOT NULL DEFAULT 0,
+  games_checked INTEGER NOT NULL DEFAULT 0,
+  games_fetched INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  completed_at TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS archive_historical_reconstructions (
+  archive_historical_reconstruction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  archive_reconstruction_run_id INTEGER NOT NULL,
+  reconstruction_version TEXT NOT NULL DEFAULT 'archive-reconstruction-v1',
+  historical_archive_prop_id INTEGER NOT NULL,
+  board_date TEXT NOT NULL,
+  information_cutoff_at TEXT NOT NULL,
+  pitcher_id INTEGER,
+  opponent_team_id INTEGER,
+  opponent_mlb_team_id INTEGER,
+  pitcher_hand TEXT,
+  prop_line REAL NOT NULL,
+  prior_start_count INTEGER NOT NULL DEFAULT 0,
+  last_start_date TEXT,
+  last3_k_avg REAL,
+  last5_k_avg REAL,
+  last10_k_avg REAL,
+  last5_k_per_bf REAL,
+  last5_avg_bf REAL,
+  last5_avg_ip REAL,
+  last5_avg_pitch_count REAL,
+  form_delta_l3_l10 REAL,
+  baseline_projection REAL,
+  window_7_pa INTEGER NOT NULL DEFAULT 0,
+  window_7_k INTEGER NOT NULL DEFAULT 0,
+  window_7_k_rate REAL,
+  window_14_pa INTEGER NOT NULL DEFAULT 0,
+  window_14_k INTEGER NOT NULL DEFAULT 0,
+  window_14_k_rate REAL,
+  window_30_pa INTEGER NOT NULL DEFAULT 0,
+  window_30_k INTEGER NOT NULL DEFAULT 0,
+  window_30_k_rate REAL,
+  weighted_recent_k_rate REAL,
+  sample_confidence TEXT NOT NULL DEFAULT 'NONE',
+  matchup_multiplier REAL,
+  reconstructed_projection REAL,
+  reconstructed_edge REAL,
+  reconstructed_over_probability REAL,
+  reconstructed_preferred_side TEXT,
+  reconstruction_status TEXT NOT NULL,
+  reconstruction_score INTEGER NOT NULL DEFAULT 0,
+  missing_features_json TEXT NOT NULL DEFAULT '[]',
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  feature_json TEXT NOT NULL DEFAULT '{}',
+  actual_strikeouts INTEGER,
+  market_result TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (archive_reconstruction_run_id) REFERENCES archive_historical_reconstruction_runs(archive_reconstruction_run_id),
+  FOREIGN KEY (historical_archive_prop_id) REFERENCES historical_archive_props(historical_archive_prop_id),
+  FOREIGN KEY (pitcher_id) REFERENCES pitchers(pitcher_id),
+  FOREIGN KEY (opponent_team_id) REFERENCES teams(team_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_recon_prop
+  ON archive_historical_reconstructions(historical_archive_prop_id,archive_historical_reconstruction_id);
+CREATE INDEX IF NOT EXISTS idx_archive_recon_status
+  ON archive_historical_reconstructions(reconstruction_status,board_date);

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ingestion Health</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/schedule-sync.css">
+  <link rel="stylesheet" href="/sync-health.css">
+</head>
+<body>
+  <header class="topbar">
+    <a href="/board-editor.html">Board Editor</a>
+    <a href="/model-control.html">Model Control</a>
+    <strong>Sync Health</strong>
+    <a href="/schedule-sync.html">Schedule Sync</a>
+    <a href="/pitcher-log-sync.html">Pitcher Logs</a>
+    <a href="/team-split-sync.html">Team Splits</a>
+  <a href="/pitcher-features.html">Pitcher Features</a><a href="/team-features.html">Team Features</a><a href="/prop-feature-snapshots.html">Prop Snapshots</a><a href="/lineup-sync.html">Lineups</a></header>
+  <main class="sync-shell">
+    <section class="hero-card">
+      <div>
+        <p class="eyebrow">Release 3.1 - Build 2.4</p>
+        <h1>Ingestion Health Dashboard</h1>
+        <p>One operational view for the schedule, pitcher-game-log, and team-strikeout-split pipelines.</p>
+      </div>
+      <button id="refresh" type="button" class="secondary">Refresh</button>
+    </section>
+
+    <section id="overall"></section>
+    <section class="source-grid" id="sources"></section>
+
+    <section class="panel">
+      <div class="panel-heading"><h2>Recent sync runs</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Run</th><th>Dataset</th><th>Status</th><th>Trigger</th><th>Started</th><th>Read</th><th>Inserted</th><th>Updated</th><th>Rejected</th><th>Errors</th></tr></thead>
+          <tbody id="runs"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><h2>Recent errors</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Dataset</th><th>Stage</th><th>Code</th><th>Record</th><th>Message</th><th>Resolved</th></tr></thead>
+          <tbody id="errors"></tbody>
+        </table>
+      </div>
+    </section>
+    <p id="message" role="status"></p>
+  </main>
+  <script src="/sync-health.js" defer></script>
+</body>
+</html>

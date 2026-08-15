@@ -1,0 +1,1 @@
+.controls{display:flex;gap:1rem;align-items:end}.controls label{display:flex;flex-direction:column;gap:.4rem}.controls input{max-width:140px;padding:.65rem}.reason{max-width:320px;white-space:normal;font-size:.85rem}.status-research-ready,.status-succeeded{color:#9be58d}.status-partial{color:#f0c75e}.status-incomplete,.status-failed{color:#ef8c8c}

@@ -1,0 +1,45 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mlb-k-prop-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-20",
+  "workers_dev": true,
+
+  "routes": [
+    {
+      "pattern": "mlb.kalupa.net",
+      "custom_domain": true
+    },
+    {
+      "pattern": "admin.mlb.kalupa.net",
+      "custom_domain": true
+    }
+  ],
+
+  "vars": {
+    "TEAM_DOMAIN": "https://buffetbets.cloudflareaccess.com",
+    "POLICY_AUD": "4fbb66f4a1bee6bf4cbe0a34fac0d417f1d3b72bb573b75cd8dc29d7e14e2d99"
+  },
+
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mlb-k-prop-prod",
+      "database_id": "6c6d614b-d1e0-44d2-90ec-9a75a192e4f0",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  }
+}

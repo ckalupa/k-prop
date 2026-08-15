@@ -1,0 +1,1 @@
+.sim-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;align-items:end}.sim-grid label{display:grid;gap:7px;color:#cbd5e1}.sim-grid input{background:#111827;border:1px solid #374151;border-radius:10px;color:#f8fafc;padding:11px}.note{margin:0 4px 18px}.table-wrap{overflow:auto}

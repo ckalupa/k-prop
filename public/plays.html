@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plays of the Day — MLB K-Prop Tracker</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/plays.css">
+</head>
+<body>
+<header class="topbar">
+  <div><p class="eyebrow">PRIVATE BET TRACKER</p><h1>Plays of the Day</h1></div>
+  <nav class="plays-nav"><a href="/">Dashboard</a><a href="/board-editor.html">Board Editor</a><a href="/pitcher-history.html">Pitcher History</a><span id="identity">Authenticated</span></nav>
+</header>
+<main class="plays-main">
+  <section class="metric-grid" aria-label="Betting summary">
+    <article><span>Total wagered</span><strong id="total-wagered">$0.00</strong></article>
+    <article><span>Total returned</span><strong id="total-returned">$0.00</strong></article>
+    <article><span>Net profit/loss</span><strong id="net-profit">$0.00</strong></article>
+    <article><span>ROI</span><strong id="roi">0.0%</strong></article>
+    <article><span>Pending / review</span><strong id="pending-count">0 / 0</strong></article>
+    <article><span>Tracked bankroll</span><strong id="bankroll">$0.00</strong></article>
+  </section>
+
+  <section class="plays-card">
+    <div class="section-heading"><div><h2>Create a tracked entry</h2><p>Snapshot the exact plays, lines, multiplier rules, and amount wagered.</p></div><button id="settle-now" type="button">Refresh Results</button></div>
+    <div class="form-grid">
+      <label>Board<div class="board-control"><select id="board-select"></select><button id="reload-boards" type="button">Reload</button></div></label>
+      <label>Entry name<input id="entry-name" type="text" maxlength="100" placeholder="Afternoon 3-pick"></label>
+      <label>Entry type<select id="entry-type"><option value="POWER">Power Play</option><option value="FLEX">Flex Play</option></select></label>
+      <label>Amount wagered<input id="amount-wagered" type="number" min="0" step="0.01" value="20"></label>
+      <label>Power Play multiplier<input id="power-multiplier" type="number" min="0" step="0.01" value="3"></label>
+      <label>Flex full-hit multiplier<input id="flex-full-multiplier" type="number" min="0" step="0.01" value="2.25"></label>
+      <label>Boost percentage<input id="boost-percent" type="number" min="0" step="0.01" value="0" placeholder="20 for a 20% boost"></label>
+      <label>Promo / special<input id="promo-label" type="text" maxlength="100" placeholder="Optional"></label>
+    </div>
+    <p id="selected-board-note" class="history-note">Select a board to load its recommendations.</p>
+    <label class="notes-label">Notes<textarea id="entry-notes" rows="2" placeholder="Optional entry notes"></textarea></label>
+
+    <h3>Select legs</h3>
+    <div id="candidate-list" class="candidate-list"><p class="muted">Select a board.</p></div>
+
+    <div class="rules-heading"><div><h3>Flex payout table</h3><p>Partial-hit rows are generated from the selected leg count, including 2/3, 3/4, 3/5, and 4/5. Edit each multiplier to match PrizePicks.</p></div><div class="rules-actions"><button id="generate-flex-rules" type="button">Generate Flex Table</button><button id="add-rule" type="button">Add Reduced-Leg Rule</button></div></div>
+    <div id="rules-list" class="rules-list"></div>
+    <button id="save-slip" class="primary-action" type="button">Save Tracked Entry</button>
+    <p id="form-message" class="message" aria-live="polite"></p>
+  </section>
+
+  <section class="plays-card">
+    <div class="section-heading"><div><h2>Bankroll adjustments</h2><p>Deposits and withdrawals are kept separate from betting profit.</p></div></div>
+    <div class="bankroll-grid">
+      <label>Date<input id="transaction-date" type="date"></label>
+      <label>Type<select id="transaction-type"><option>STARTING_BALANCE</option><option>DEPOSIT</option><option>WITHDRAWAL</option><option>ADJUSTMENT</option></select></label>
+      <label>Amount<input id="transaction-amount" type="number" step="0.01"></label>
+      <label>Note<input id="transaction-note" type="text" maxlength="200"></label>
+      <button id="add-transaction" type="button">Add Adjustment</button>
+    </div>
+  </section>
+
+  <section class="plays-card">
+    <div class="section-heading"><div><h2>Tracked entries</h2><p>Results settle from the same prop data used by the dashboard. Misses receive an automatic postgame diagnosis you can review and edit.</p></div></div>
+    <div id="slips-list" class="slips-list"><p class="muted">Loading…</p></div>
+  </section>
+</main>
+<script src="/plays.js" defer></script>
+</body>
+</html>

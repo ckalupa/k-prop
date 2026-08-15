@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MLB Lineup Sync</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/lineup-sync.css">
+</head>
+<body>
+<header class="topbar">
+  <a href="/board-editor.html">Board Editor</a><a href="/model-control.html">Model Control</a><a href="/sync-health.html">Sync Health</a>
+  <a href="/schedule-sync.html">Schedule Sync</a><a href="/team-split-sync.html">Team Splits</a><strong>Lineups</strong>
+</header>
+<main class="sync-shell">
+  <section class="hero-card">
+    <div><p class="eyebrow">Release 3.5 · Build 6.1</p><h1>Lineup Data Foundation</h1><p>Captures immutable MLB batting-order snapshots, batter handedness, and opposing probable-pitcher context. This build stores lineup data only; it does not change v13 or v14 predictions.</p></div>
+    <button id="run-sync" type="button">Sync lineups</button>
+  </section>
+  <section class="controls"><label>Date <input id="date" type="date"></label><button id="refresh" class="secondary" type="button">Refresh</button></section>
+  <section class="status-grid" id="status-grid"></section>
+  <section class="panel"><div class="panel-heading"><h2>Latest lineup snapshots</h2></div><div id="lineups" class="lineup-grid"></div></section>
+  <section class="panel"><div class="panel-heading"><h2>Recent sync runs</h2></div><div class="table-wrap"><table><thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Games</th><th>Snapshots</th><th>Unchanged</th><th>Rejected</th></tr></thead><tbody id="runs"></tbody></table></div></section>
+  <p id="message" role="status"></p>
+</main>
+<script src="/lineup-sync.js" defer></script>
+</body></html>

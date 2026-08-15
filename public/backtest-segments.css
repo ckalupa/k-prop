@@ -1,0 +1,1 @@
+.controls{display:flex;gap:18px;align-items:end;flex-wrap:wrap}.controls label{display:flex;flex-direction:column;gap:6px}.controls input,.controls select{min-width:180px}td:nth-child(n+3){font-variant-numeric:tabular-nums}

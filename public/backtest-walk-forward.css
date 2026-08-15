@@ -1,0 +1,1 @@
+.controls{display:flex;align-items:end;gap:1rem;flex-wrap:wrap}.controls label{display:grid;gap:.45rem;color:#cbd5e1}.controls input{width:9rem;padding:.7rem .8rem;border:1px solid #374151;border-radius:.6rem;background:#111827;color:#f8fafc}.status-skipped{color:#f4c95d}.status-executed,.status-succeeded{color:#9be28f}.status-partial{color:#f4c95d}.status-failed{color:#f28b82}

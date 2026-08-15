@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Board Editor — MLB K-Prop Tracker</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/board-editor.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MLB K-PROP PLATFORM</p>
+      <h1>Draft Board Editor</h1>
+    </div>
+    <nav class="editor-nav">
+      <a href="/">Dashboard</a>
+      <span id="identity">Loading identity…</span>
+    </nav>
+  </header>
+
+  <main class="editor-main">
+    <section class="editor-card">
+      <h2>Create or select a draft</h2>
+      <div class="editor-grid">
+        <label>Existing board
+          <select id="board-select"><option value="">Select a board</option></select>
+        </label>
+        <label>Board date
+          <input id="board-date" type="date">
+        </label>
+        <label>Board name
+          <input id="board-name" type="text" maxlength="120" placeholder="PrizePicks 2026-07-21">
+        </label>
+        <button id="create-board" type="button">Create Draft</button>
+        <button id="save-board" type="button" disabled>Save Board</button>
+        <button id="activate-board" class="danger-button" type="button" disabled>Activate Board</button>
+      </div>
+      <p id="board-message" class="editor-message"></p>
+    </section>
+
+    <section class="editor-card">
+      <h2>Add prop</h2>
+      <div class="editor-grid prop-grid">
+        <label>Pitcher
+          <select id="pitcher-select"></select>
+        </label>
+        <label>Opponent
+          <select id="opponent-select"></select>
+        </label>
+        <label>Strikeout line
+          <input id="line-input" type="number" min="0.5" max="15.5" step="0.5" value="4.5">
+        </label>
+        <label>Available side
+          <select id="side-select">
+            <option>Both</option>
+            <option>More only</option>
+          </select>
+        </label>
+        <label>Prop type
+          <select id="type-select">
+            <option>Standard</option>
+            <option>Green Goblin</option>
+            <option>Red Goblin</option>
+          </select>
+        </label>
+        <button id="add-prop" type="button" disabled>Add Prop</button>
+      </div>
+    </section>
+
+<section class="editor-card">
+  <h2>Bulk import props</h2>
+
+  <p>
+    Paste one prop per line using:
+    Pitcher, Opponent, Line, Side, Type
+  </p>
+
+  <textarea
+    id="bulk-import-text"
+    rows="10"
+    placeholder="Paul Skenes,ARI,7.5,Both,Standard&#10;Tarik Skubal,KC,6.5,More only,Green Goblin"
+  ></textarea>
+
+  <div class="editor-grid">
+    <button id="preview-import" type="button" disabled>
+      Preview Import
+    </button>
+
+    <button id="run-import" type="button" disabled>
+      Import Props
+    </button>
+  </div>
+
+  <p id="import-message" class="editor-message"></p>
+
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Row</th>
+          <th>Pitcher</th>
+          <th>Opponent</th>
+          <th>Line</th>
+          <th>Side</th>
+          <th>Type</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="import-preview-body">
+        <tr>
+          <td colspan="7" class="loading">
+            Paste props and click Preview Import.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+    <section class="table-card">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Pitcher</th>
+              <th>Opponent</th>
+              <th>Line</th>
+              <th>Side</th>
+              <th>Type</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="prop-body">
+            <tr><td colspan="6" class="loading">Select or create a draft board.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/board-editor.js" defer></script>
+</body>
+</html>
