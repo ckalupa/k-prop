@@ -10920,7 +10920,7 @@ async function runContextBackfillBatch(request:Request,env:Env):Promise<Response
   const schedUrl=new URL('https://statsapi.mlb.com/api/v1/schedule');schedUrl.searchParams.set('sportId','1');schedUrl.searchParams.set('date',date);
   try{
     const schedule=await fetchMlbJson(schedUrl.toString());const allGames=((schedule as any)?.dates??[]).flatMap((d:any)=>Array.isArray(d.games)?d.games:[]);const games=allGames.slice(offset,offset+limit);
-    const run=await env.DB.prepare(`INSERT INTO sync_runs(run_uuid,source_name,dataset_name,sync_mode,trigger_source,status,source_cursor_start,source_cursor_end) VALUES(?,'MLB_STATS_API','GAME_CONTEXT_BACKFILL','HISTORICAL','ADMIN','RUNNING',?,?)`).bind(crypto.randomUUID(),`${date}:${offset}`,`${date}:${Math.max(offset,offset+games.length-1)}`).run();
+    const run=await env.DB.prepare(`INSERT INTO sync_runs(run_uuid,source_name,dataset_name,sync_mode,trigger_source,status,source_cursor_start,source_cursor_end) VALUES(?,'MLB_STATS_API','GAME_CONTEXT_BACKFILL','BACKFILL','ADMIN','RUNNING',?,?)`).bind(crypto.randomUUID(),`${date}:${offset}`,`${date}:${Math.max(offset,offset+games.length-1)}`).run();
     const syncRunId=Number(run.meta.last_row_id);let stored=0,weather=0,umpires=0,errors=0,requests=1;
     for(const g of games){const gamePk=Number(g?.gamePk??0);if(!gamePk)continue;try{
       const feed=await fetchMlbJson(`https://statsapi.mlb.com/api/v1.1/game/${gamePk}/feed/live`);requests++;
