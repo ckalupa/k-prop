@@ -10885,23 +10885,30 @@ async function certifyContextBackfillDate(env:Env,ctx:ContextBackfillContext,dat
       r.board_date,
       r.pitcher_id,
       pit.mlb_id AS pitcher_mlb_id,
-      COALESCE(pl.mlb_game_pk,g.mlb_game_pk) AS mlb_game_pk,
-      CASE WHEN pl.mlb_game_pk IS NOT NULL THEN 'RAW_PITCHER_GAME_LOG'
+      COALESCE((
+        SELECT pl2.mlb_game_pk
+        FROM raw_pitcher_game_logs pl2
+        WHERE pl2.game_date=r.board_date
+          AND pl2.starter=1
+          AND (pl2.pitcher_id=r.pitcher_id OR (pit.mlb_id IS NOT NULL AND pl2.mlb_pitcher_id=pit.mlb_id))
+        ORDER BY CASE WHEN pl2.pitcher_id=r.pitcher_id THEN 0 ELSE 1 END,pl2.pitcher_game_log_id DESC
+        LIMIT 1
+      ),g.mlb_game_pk) AS mlb_game_pk,
+      CASE WHEN (
+        SELECT pl2.mlb_game_pk
+        FROM raw_pitcher_game_logs pl2
+        WHERE pl2.game_date=r.board_date
+          AND pl2.starter=1
+          AND (pl2.pitcher_id=r.pitcher_id OR (pit.mlb_id IS NOT NULL AND pl2.mlb_pitcher_id=pit.mlb_id))
+        ORDER BY CASE WHEN pl2.pitcher_id=r.pitcher_id THEN 0 ELSE 1 END,pl2.pitcher_game_log_id DESC
+        LIMIT 1
+      ) IS NOT NULL THEN 'RAW_PITCHER_GAME_LOG'
            WHEN g.mlb_game_pk IS NOT NULL THEN 'LEGACY_PROP_GAME'
            ELSE 'UNMAPPED' END AS game_mapping_source
     FROM backtest_folds f
     JOIN backtest_fold_rows_v3 fr ON fr.backtest_fold_id=f.backtest_fold_id AND fr.partition='TEST'
     JOIN backtest_dataset_rows_v3 r ON r.backtest_dataset_row_id=fr.backtest_dataset_row_id
     LEFT JOIN pitchers pit ON pit.pitcher_id=r.pitcher_id
-    LEFT JOIN raw_pitcher_game_logs pl ON pl.pitcher_game_log_id=(
-      SELECT pl2.pitcher_game_log_id
-      FROM raw_pitcher_game_logs pl2
-      WHERE pl2.game_date=r.board_date
-        AND pl2.starter=1
-        AND (pl2.pitcher_id=r.pitcher_id OR (pit.mlb_id IS NOT NULL AND pl2.mlb_pitcher_id=pit.mlb_id))
-      ORDER BY CASE WHEN pl2.pitcher_id=r.pitcher_id THEN 0 ELSE 1 END,pl2.pitcher_game_log_id DESC
-      LIMIT 1
-    )
     LEFT JOIN props p ON p.prop_id=r.prop_id
     LEFT JOIN games g ON g.game_id=p.game_id
     WHERE f.backtest_run_id=? AND f.status='EXECUTED' AND f.test_date_min=?
@@ -10920,7 +10927,7 @@ async function certifyContextBackfillDate(env:Env,ctx:ContextBackfillContext,dat
     if(snap&&!weather)reasons.push('weather_missing');
     if(snap&&!umpire)reasons.push('umpire_missing');
     const status=reasons.length?'EXCLUDED':'RECONSTRUCTED_CERTIFIED';
-    await env.DB.prepare(`INSERT INTO game_context_backfill_certifications(backtest_run_id,backtest_dataset_build_id,backtest_dataset_row_id,board_date,prop_id,mlb_game_pk,game_context_snapshot_id,certification_status,quality_score,weather_available,umpire_available,provenance,reasons_json,evidence_json,certified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'HISTORICAL_RETROSPECTIVE_RECONSTRUCTION',?,?,CURRENT_TIMESTAMP) ON CONFLICT(backtest_run_id,backtest_dataset_row_id) DO UPDATE SET mlb_game_pk=excluded.mlb_game_pk,game_context_snapshot_id=excluded.game_context_snapshot_id,certification_status=excluded.certification_status,quality_score=excluded.quality_score,weather_available=excluded.weather_available,umpire_available=excluded.umpire_available,provenance=excluded.provenance,reasons_json=excluded.reasons_json,evidence_json=excluded.evidence_json,certified_at=CURRENT_TIMESTAMP`).bind(ctx.runId,ctx.buildId,r.backtest_dataset_row_id,date,r.prop_id??null,r.mlb_game_pk??null,snap?.game_context_snapshot_id??null,status,q,weather?1:0,umpire?1:0,JSON.stringify(reasons),JSON.stringify({source_mode:snap?.source_mode??null,captured_at:snap?.captured_at??null,retrospective_reconstruction:true,allowed_fields:['venue','day_night','temperature','condition','wind','home_plate_umpire'],postgame_outcomes_used:false,mapping_version:'pitcher-game-log-v1',game_mapping_source:r.game_mapping_source,pitcher_id:r.pitcher_id??null,pitcher_mlb_id:r.pitcher_mlb_id??null})).run();
+    await env.DB.prepare(`INSERT INTO game_context_backfill_certifications(backtest_run_id,backtest_dataset_build_id,backtest_dataset_row_id,board_date,prop_id,mlb_game_pk,game_context_snapshot_id,certification_status,quality_score,weather_available,umpire_available,provenance,reasons_json,evidence_json,certified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'HISTORICAL_RETROSPECTIVE_RECONSTRUCTION',?,?,CURRENT_TIMESTAMP) ON CONFLICT(backtest_run_id,backtest_dataset_row_id) DO UPDATE SET mlb_game_pk=excluded.mlb_game_pk,game_context_snapshot_id=excluded.game_context_snapshot_id,certification_status=excluded.certification_status,quality_score=excluded.quality_score,weather_available=excluded.weather_available,umpire_available=excluded.umpire_available,provenance=excluded.provenance,reasons_json=excluded.reasons_json,evidence_json=excluded.evidence_json,certified_at=CURRENT_TIMESTAMP`).bind(ctx.runId,ctx.buildId,r.backtest_dataset_row_id,date,r.prop_id??null,r.mlb_game_pk??null,snap?.game_context_snapshot_id??null,status,q,weather?1:0,umpire?1:0,JSON.stringify(reasons),JSON.stringify({source_mode:snap?.source_mode??null,captured_at:snap?.captured_at??null,retrospective_reconstruction:true,allowed_fields:['venue','day_night','temperature','condition','wind','home_plate_umpire'],postgame_outcomes_used:false,mapping_version:'pitcher-game-log-v2',game_mapping_source:r.game_mapping_source,pitcher_id:r.pitcher_id??null,pitcher_mlb_id:r.pitcher_mlb_id??null})).run();
     processed++; if(status==='RECONSTRUCTED_CERTIFIED')certified++; else excluded++;
   }
   return {processed,certified,excluded};
@@ -10933,7 +10940,7 @@ async function runContextBackfillBatch(request:Request,env:Env):Promise<Response
   const stateMap=new Map(states.map(x=>[String(x.calendar_date),x]));
   let date=String(body.date||'');
   if(!date)date=ctx.dates.find(d=>String(stateMap.get(d)?.status??'')!=='COMPLETE')||'';
-  if(!date)return json({release:'3.7',build:'8.2.2',status:'DONE',done:true,production_models_changed:false});
+  if(!date)return json({release:'3.7',build:'8.2.3',status:'DONE',done:true,production_models_changed:false});
   if(!ctx.dates.includes(date))return json({error:'Date is not an executed walk-forward TEST date.'},{status:400});
   const prior=stateMap.get(date);const offset=Math.max(0,Number(body.offset??prior?.games_processed??0));const limit=Math.max(1,Math.min(4,Number(body.limit??4)));
   const schedUrl=new URL('https://statsapi.mlb.com/api/v1/schedule');schedUrl.searchParams.set('sportId','1');schedUrl.searchParams.set('date',date);
@@ -10951,22 +10958,22 @@ async function runContextBackfillBatch(request:Request,env:Env):Promise<Response
     await env.DB.prepare(`UPDATE sync_runs SET status=?,completed_at=CURRENT_TIMESTAMP,rows_read=?,rows_inserted=?,request_count=?,details_json=? WHERE sync_run_id=?`).bind(errors>0&&stored===0?'FAILED':errors>0?'PARTIAL':'SUCCEEDED',games.length,stored,requests,JSON.stringify({date,offset,limit,total_games:allGames.length,stored,weather,umpires,errors,done,next_offset:nextOffset,source_mode:'HISTORICAL_BACKFILL'}),syncRunId).run();
     await env.DB.prepare(`INSERT INTO game_context_backfill_dates(calendar_date,status,total_games,games_processed,snapshots_stored,weather_rows,umpire_rows,error_count,last_error,attempted_at,completed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,NULL,CURRENT_TIMESTAMP,CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,CURRENT_TIMESTAMP) ON CONFLICT(calendar_date) DO UPDATE SET status=excluded.status,total_games=excluded.total_games,games_processed=excluded.games_processed,snapshots_stored=game_context_backfill_dates.snapshots_stored+excluded.snapshots_stored,weather_rows=game_context_backfill_dates.weather_rows+excluded.weather_rows,umpire_rows=game_context_backfill_dates.umpire_rows+excluded.umpire_rows,error_count=game_context_backfill_dates.error_count+excluded.error_count,last_error=NULL,attempted_at=CURRENT_TIMESTAMP,completed_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE game_context_backfill_dates.completed_at END,updated_at=CURRENT_TIMESTAMP`).bind(date,done?'COMPLETE':'RUNNING',allGames.length,nextOffset,stored,weather,umpires,errors,done?1:0,done?1:0).run();
     let certification=null;if(done)certification=await certifyContextBackfillDate(env,ctx,date);
-    return json({release:'3.7',build:'8.2.2',date,offset,next_offset:nextOffset,total_games:allGames.length,stored,weather,umpires,errors,done,certification,production_models_changed:false});
+    return json({release:'3.7',build:'8.2.3',date,offset,next_offset:nextOffset,total_games:allGames.length,stored,weather,umpires,errors,done,certification,production_models_changed:false});
   }catch(e){const msg=e instanceof Error?e.message:String(e);await env.DB.prepare(`INSERT INTO game_context_backfill_dates(calendar_date,status,last_error,attempted_at,updated_at) VALUES(?,'FAILED',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(calendar_date) DO UPDATE SET status='FAILED',last_error=excluded.last_error,attempted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP`).bind(date,msg).run().catch(()=>null);return json({error:msg,date},{status:500});}
 }
 
 async function getContextBackfillStatus(env:Env):Promise<Response>{
-  const ctx=await getContextBackfillContext(env);if(!ctx)return json({release:'3.7',build:'8.2.2',message:'No completed walk-forward-v2 run found.',production_models_changed:false});
+  const ctx=await getContextBackfillContext(env);if(!ctx)return json({release:'3.7',build:'8.2.3',message:'No completed walk-forward-v2 run found.',production_models_changed:false});
   const rows=(await env.DB.prepare(`SELECT * FROM game_context_backfill_dates WHERE calendar_date>=? AND calendar_date<=? ORDER BY calendar_date`).bind(ctx.dates[0],ctx.dates.at(-1)).all<Record<string,unknown>>()).results??[];const m=new Map(rows.map(r=>[String(r.calendar_date),r]));
   const complete=ctx.dates.filter(d=>String(m.get(d)?.status??'')==='COMPLETE');const failed=rows.filter(r=>String(r.status)==='FAILED');const next=ctx.dates.find(d=>String(m.get(d)?.status??'')!=='COMPLETE')||null;
-  // Build 8.2.2 one-time repair: certifications created before pitcher/date game mapping
+  // Build 8.2.3 certification repair: certifications created before pitcher/date game mapping
   // are re-evaluated once. New evidence_json carries mapping_version so future status
   // refreshes remain read-mostly and do not repeatedly rewrite legitimate exclusions.
-  const legacyCertDates=(await env.DB.prepare(`SELECT DISTINCT board_date FROM game_context_backfill_certifications WHERE backtest_run_id=? AND evidence_json NOT LIKE '%pitcher-game-log-v1%'`).bind(ctx.runId).all<{board_date:string}>()).results??[];
+  const legacyCertDates=(await env.DB.prepare(`SELECT DISTINCT board_date FROM game_context_backfill_certifications WHERE backtest_run_id=? AND evidence_json NOT LIKE '%pitcher-game-log-v2%'`).bind(ctx.runId).all<{board_date:string}>()).results??[];
   const completeSet=new Set(complete);for(const x of legacyCertDates){const d=String(x.board_date);if(completeSet.has(d))await certifyContextBackfillDate(env,ctx,d);}
   const cert=await env.DB.prepare(`SELECT COUNT(*) rows,SUM(CASE WHEN certification_status='RECONSTRUCTED_CERTIFIED' THEN 1 ELSE 0 END) certified,SUM(CASE WHEN certification_status='EXCLUDED' THEN 1 ELSE 0 END) excluded,COUNT(DISTINCT board_date) dates,AVG(quality_score) avg_quality,SUM(weather_available) weather_rows,SUM(umpire_available) umpire_rows FROM game_context_backfill_certifications WHERE backtest_run_id=?`).bind(ctx.runId).first<Record<string,unknown>>();
   const recent=(await env.DB.prepare(`SELECT board_date,certification_status,quality_score,weather_available,umpire_available,reasons_json FROM game_context_backfill_certifications WHERE backtest_run_id=? ORDER BY board_date DESC,context_certification_id DESC LIMIT 40`).bind(ctx.runId).all<Record<string,unknown>>()).results??[];
-  return json({release:'3.7',build:'8.2.2',mode:'HISTORICAL_CONTEXT_BACKFILL',backtest_run_id:ctx.runId,dataset_build_id:ctx.buildId,range:{start:ctx.dates[0],end:ctx.dates.at(-1)},dates:{required:ctx.dates.length,complete:complete.length,failed:failed.length,next_date:next,recent:rows.slice(-20).reverse()},certification:{rows:Number(cert?.rows??0),certified:Number(cert?.certified??0),excluded:Number(cert?.excluded??0),dates:Number(cert?.dates??0),avg_quality:cert?.avg_quality==null?null:Number(cert.avg_quality),weather_rows:Number(cert?.weather_rows??0),umpire_rows:Number(cert?.umpire_rows??0),recent},done:complete.length>=ctx.dates.length,provenance:'Historical MLB Stats API retrospective reconstruction; research replay only. No postgame outcome fields are used as context features.',production_models_changed:false});
+  return json({release:'3.7',build:'8.2.3',mode:'HISTORICAL_CONTEXT_BACKFILL',backtest_run_id:ctx.runId,dataset_build_id:ctx.buildId,range:{start:ctx.dates[0],end:ctx.dates.at(-1)},dates:{required:ctx.dates.length,complete:complete.length,failed:failed.length,next_date:next,recent:rows.slice(-20).reverse()},certification:{rows:Number(cert?.rows??0),certified:Number(cert?.certified??0),excluded:Number(cert?.excluded??0),dates:Number(cert?.dates??0),avg_quality:cert?.avg_quality==null?null:Number(cert.avg_quality),weather_rows:Number(cert?.weather_rows??0),umpire_rows:Number(cert?.umpire_rows??0),recent},done:complete.length>=ctx.dates.length,provenance:'Historical MLB Stats API retrospective reconstruction; research replay only. No postgame outcome fields are used as context features.',production_models_changed:false});
 }
 
 
