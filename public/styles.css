@@ -352,3 +352,72 @@ tbody tr:hover { background: rgba(66, 105, 135, .12); }
 .yesterday-category-records {
   margin-bottom: 1.25rem;
 }
+
+
+/* Build 9.2.4 — Daily Board true mobile layout */
+@media (max-width: 800px) {
+  html, body.daily-board-page { max-width: 100%; overflow-x: hidden; }
+  body.daily-board-page main,
+  body.daily-board-page .results-section,
+  body.daily-board-page .table-card,
+  body.daily-board-page .table-scroll {
+    width: 100%; max-width: 100%; min-width: 0 !important; box-sizing: border-box;
+  }
+  body.daily-board-page .results-section { min-width: 0 !important; }
+  body.daily-board-page .table-scroll { overflow: visible; }
+  body.daily-board-page .table-card table {
+    display: block; width: 100%; max-width: 100%; min-width: 0 !important;
+  }
+  body.daily-board-page .table-card thead { display: none; }
+  body.daily-board-page .table-card tbody { display: block; width: 100%; }
+  body.daily-board-page .table-card tbody tr {
+    display: block; width: 100%; max-width: 100%; padding: .35rem 0;
+    border-bottom: 1px solid rgba(38,56,73,.9); box-sizing: border-box;
+  }
+  body.daily-board-page .table-card tbody td {
+    display: grid; grid-template-columns: minmax(105px, 34%) minmax(0, 1fr);
+    gap: .65rem; width: 100%; max-width: 100%; min-width: 0 !important;
+    box-sizing: border-box; padding: .5rem .75rem; border-bottom: 0;
+    white-space: normal !important; overflow-wrap: anywhere; word-break: break-word;
+  }
+  body.daily-board-page .table-card tbody td::before {
+    color: var(--muted); font-size: .68rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  body.daily-board-page #board-body td:nth-child(1)::before { content: "Pitcher"; }
+  body.daily-board-page #board-body td:nth-child(2)::before { content: "Opp"; }
+  body.daily-board-page #board-body td:nth-child(3)::before { content: "Line"; }
+  body.daily-board-page #board-body td:nth-child(4)::before { content: "Projection"; }
+  body.daily-board-page #board-body td:nth-child(5)::before { content: "Edge"; }
+  body.daily-board-page #board-body td:nth-child(6)::before { content: "Over %"; }
+  body.daily-board-page #board-body td:nth-child(7)::before { content: "Side"; }
+  body.daily-board-page #board-body td:nth-child(8)::before { content: "Confidence"; }
+  body.daily-board-page #board-body td:nth-child(9)::before { content: "Tier"; }
+  body.daily-board-page #board-body td:nth-child(10)::before { content: "Decision"; }
+  body.daily-board-page #board-body td:nth-child(11)::before { content: "Actual Ks"; }
+  body.daily-board-page #board-body td:nth-child(12)::before { content: "Market Result"; }
+  body.daily-board-page #board-body td:nth-child(13)::before { content: "Recommendation Result"; }
+  body.daily-board-page #board-body td:nth-child(14)::before { content: "Reason"; }
+  body.daily-board-page #yesterday-results-body td:nth-child(1)::before { content: "Pitcher"; }
+  body.daily-board-page #yesterday-results-body td:nth-child(2)::before { content: "Opp"; }
+  body.daily-board-page #yesterday-results-body td:nth-child(3)::before { content: "Line"; }
+  body.daily-board-page #yesterday-results-body td:nth-child(4)::before { content: "Side"; }
+  body.daily-board-page #yesterday-results-body td:nth-child(5)::before { content: "Decision"; }
+  body.daily-board-page #yesterday-results-body td:nth-child(6)::before { content: "Actual"; }
+  body.daily-board-page #yesterday-results-body td:nth-child(7)::before { content: "Market Result"; }
+  body.daily-board-page #yesterday-results-body td:nth-child(8)::before { content: "Model Result"; }
+  body.daily-board-page .table-card tbody td.loading {
+    display: block; text-align: center; padding: 1.5rem;
+  }
+  body.daily-board-page .table-card tbody td.loading::before { content: none; }
+  body.daily-board-page .reason { min-width: 0 !important; }
+  body.daily-board-page .controls { width: 100%; }
+  body.daily-board-page .controls label { width: 100%; min-width: 0; }
+  body.daily-board-page .controls input,
+  body.daily-board-page .controls select { width: 100%; max-width: 100%; min-width: 0 !important; box-sizing: border-box; }
+  body.daily-board-page .topbar { gap: 1rem; }
+  body.daily-board-page .topbar > div,
+  body.daily-board-page .status-wrap { min-width: 0; max-width: 100%; }
+  body.daily-board-page .topbar-button,
+  body.daily-board-page .status-wrap button { max-width: 100%; box-sizing: border-box; }
+}
