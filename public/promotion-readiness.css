@@ -1,3 +1,64 @@
 .evidence-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem}.evidence-grid article{border:1px solid var(--border,#d5d9df);border-radius:12px;padding:1rem}.badge{display:inline-block;padding:.2rem .55rem;border-radius:999px;font-size:.78rem;font-weight:700}.badge.pass{background:#e8f5ec;color:#176b36}.badge.fail{background:#fdecec;color:#9b2424}.badge.wait{background:#f3f4f6;color:#5d6470}pre{white-space:pre-wrap;overflow-wrap:anywhere}
 
 #cert-status{margin-bottom:1rem}#cert-failures td:last-child{max-width:520px;overflow-wrap:anywhere}
+
+/* Build 9.2.2 — mobile no-horizontal-scroll hardening */
+html,body{max-width:100%;overflow-x:hidden}
+.sync-shell,.panel,.hero-card,.status-grid,.evidence-grid{min-width:0}
+.panel,.hero-card{max-width:100%;box-sizing:border-box}
+.status-grid>article,.evidence-grid>article{min-width:0;overflow-wrap:anywhere}
+.topbar{flex-wrap:wrap}
+.topbar a,.topbar strong{min-width:0}
+
+@media(max-width:700px){
+  .sync-shell{width:100%;max-width:100%;padding:12px;box-sizing:border-box}
+  .hero-card,.panel{padding:14px;border-radius:12px}
+  .hero-card{gap:14px}
+  .hero-card button{width:100%;white-space:normal}
+  .panel-heading{align-items:stretch;flex-direction:column;gap:10px}
+  .panel-heading button{width:100%;white-space:normal}
+  .status-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .evidence-grid{grid-template-columns:1fr;gap:10px}
+  .status-grid article,.evidence-grid article{padding:12px}
+  .status-grid article strong{font-size:1rem;overflow-wrap:anywhere;word-break:break-word}
+  .topbar{position:static;justify-content:flex-start;gap:.55rem .9rem;padding:.85rem 1rem}
+  .topbar a,.topbar strong{font-size:.86rem;white-space:normal}
+
+  /* Turn dense desktop tables into stacked key/value cards on phones. */
+  .table-wrap{overflow:visible;width:100%;max-width:100%}
+  .mobile-card-table,.mobile-card-table tbody,.mobile-card-table tr,.mobile-card-table td{display:block;width:100%;box-sizing:border-box}
+  .mobile-card-table{border-collapse:separate;border-spacing:0}
+  .mobile-card-table thead{display:none}
+  .mobile-card-table tbody tr{margin:0 0 12px;padding:6px 12px;border:1px solid var(--border,#30333d);border-radius:10px;background:rgba(255,255,255,.018)}
+  .mobile-card-table tbody td{display:grid;grid-template-columns:minmax(96px,38%) minmax(0,1fr);gap:10px;align-items:start;padding:8px 0;border-bottom:1px solid #30333d;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+  .mobile-card-table tbody td:last-child{border-bottom:0}
+  .mobile-card-table tbody td::before{font-size:.72rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted,#8fa2b5)}
+  .mobile-card-table tbody td[colspan]{display:block;text-align:center;padding:12px 4px}
+  .mobile-card-table tbody td[colspan]::before{display:none}
+
+  .gates-table td:nth-child(1)::before{content:"Gate"}
+  .gates-table td:nth-child(2)::before{content:"Current"}
+  .gates-table td:nth-child(3)::before{content:"Threshold"}
+  .gates-table td:nth-child(4)::before{content:"State"}
+
+  .cert-daily-table td:nth-child(1)::before{content:"Date"}
+  .cert-daily-table td:nth-child(2)::before{content:"Paired"}
+  .cert-daily-table td:nth-child(3)::before{content:"Graded"}
+  .cert-daily-table td:nth-child(4)::before{content:"v13 hit"}
+  .cert-daily-table td:nth-child(5)::before{content:"v14 hit"}
+  .cert-daily-table td:nth-child(6)::before{content:"Δ hit"}
+  .cert-daily-table td:nth-child(7)::before{content:"Failures"}
+
+  .cert-failures-table td:nth-child(1)::before{content:"Time"}
+  .cert-failures-table td:nth-child(2)::before{content:"Date"}
+  .cert-failures-table td:nth-child(3)::before{content:"Pitcher"}
+  .cert-failures-table td:nth-child(4)::before{content:"Prop"}
+  .cert-failures-table td:nth-child(5)::before{content:"Error"}
+  #cert-failures td:last-child{max-width:none}
+  pre{max-width:100%;font-size:.78rem;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+}
+
+@media(max-width:430px){
+  .status-grid{grid-template-columns:1fr}
+  .mobile-card-table tbody td{grid-template-columns:minmax(88px,34%) minmax(0,1fr)}
+}
