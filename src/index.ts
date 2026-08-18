@@ -7922,6 +7922,12 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
       WHERE automation_run_id = ?
     `).bind(Number(payload.graded ?? 0), JSON.stringify(gradeDetails), runId).run();
 
+    try {
+      await recordLiveShadowCertificationMonitoring(env, scheduledTime, "AUTO_POST_GRADE");
+    } catch (monitorError) {
+      console.error("CERT_MONITOR post-grade capture failed:", monitorError);
+    }
+
     console.log("AUTO_GRADE completed", gradeDetails);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -11295,8 +11301,52 @@ async function collectLiveShadowCertification(env:Env){
  const hitDelta=v13.hit_rate!=null&&v14.hit_rate!=null?v14.hit_rate-v13.hit_rate:null,brierDelta=v13.brier!=null&&v14.brier!=null?v14.brier-v13.brier:null,absCal=v14.calibration_gap==null?null:Math.abs(v14.calibration_gap),sampleReady=graded.length>=cert.min_live_graded_pairs&&dates.length>=cert.min_live_distinct_dates,clean=failures.length===0&&missingProd===0&&missingCand===0;
  return {session:cert,status:sampleReady&&clean?'WINDOW_READY':'COLLECTING',summary:{paired_predictions:rows.length,graded_pairs:graded.length,distinct_dates:dates.length,min_graded_pairs:cert.min_live_graded_pairs,min_distinct_dates:cert.min_live_distinct_dates,runtime_failures:failures.length,pre_certification_runtime_failures:historicalFailures,missing_production_pairs:missingProd,missing_candidate_pairs:missingCand,source_excluded_predictions:sourceExcluded,v13,v14,hit_delta:hitDelta,brier_delta:brierDelta,abs_v14_calibration_gap:absCal,sample_ready:sampleReady,clean_window:clean},daily,failures};
 }
-async function getLiveShadowCertification(env:Env):Promise<Response>{return json({release:'3.8',build:'9.2.6',certification_version:'live-shadow-certification-v1.2',...(await collectLiveShadowCertification(env)),promotion_enabled:false,note:'Build 9.2 is observation-only and cannot promote, demote, or change model roles.'});}
-async function captureLiveShadowCertificationEvidence(env:Env,identity:AccessIdentity):Promise<Response>{const d:any=await collectLiveShadowCertification(env);if(!d.session||!d.summary)return json({error:'No active live shadow certification session.'},{status:409});const s=d.summary,date=new Date().toISOString().slice(0,10);const ins=await env.DB.prepare(`INSERT INTO live_shadow_certification_evidence(live_shadow_certification_id,evidence_uuid,evidence_date,paired_predictions,graded_pairs,missing_production_pairs,missing_candidate_pairs,runtime_failures,production_hit_rate,candidate_hit_rate,production_brier,candidate_brier,candidate_abs_calibration_gap,evidence_json,captured_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(d.session.live_shadow_certification_id,crypto.randomUUID(),date,s.paired_predictions,s.graded_pairs,s.missing_production_pairs,s.missing_candidate_pairs,s.runtime_failures,s.v13?.hit_rate??null,s.v14?.hit_rate??null,s.v13?.brier??null,s.v14?.brier??null,s.abs_v14_calibration_gap??null,JSON.stringify({build:'9.2.6',status:d.status,summary:s,daily:d.daily,promotion_enabled:false}),identity.email??identity.subject??'unknown').run();await audit(env,identity,'LIVE_SHADOW_CERTIFICATION_EVIDENCE_CAPTURED','MODEL_VERSION',Number(d.session.candidate_model_version_id),{live_shadow_certification_id:d.session.live_shadow_certification_id,evidence_id:Number(ins.meta.last_row_id),promotion_enabled:false});return json({ok:true,evidence_id:Number(ins.meta.last_row_id),certification_status:d.status,promotion_enabled:false});}
+
+type CertificationMonitorCheckpoint={live_shadow_monitor_checkpoint_id:number;checkpoint_type:string;checkpoint_key:string;checkpoint_label:string;graded_pairs:number;distinct_dates:number;runtime_failures:number;pair_integrity_failures:number;hit_delta:number|null;brier_delta:number|null;abs_calibration_gap:number|null;monitor_status:string;captured_at:string;trigger_source:string;};
+function certificationMonitorStatus(summary:any,policy:any){
+  const integrity=Number(summary?.missing_production_pairs??0)+Number(summary?.missing_candidate_pairs??0);
+  if(Number(summary?.runtime_failures??0)>0||integrity>0)return 'BLOCKED';
+  const sampleReady=Number(summary?.graded_pairs??0)>=Number(policy?.min_live_graded_pairs??Infinity)&&Number(summary?.distinct_dates??0)>=Number(policy?.min_live_distinct_dates??Infinity);
+  if(!sampleReady)return 'COLLECTING';
+  const hitOk=summary?.hit_delta!=null&&Number(summary.hit_delta)>=Number(policy?.min_live_hit_delta??-Infinity);
+  const brierOk=summary?.brier_delta!=null&&Number(summary.brier_delta)<=Number(policy?.max_live_brier_delta??Infinity);
+  const calOk=summary?.abs_v14_calibration_gap!=null&&Number(summary.abs_v14_calibration_gap)<=Number(policy?.max_abs_live_calibration_gap??Infinity);
+  return hitOk&&brierOk&&calOk?'TECHNICALLY_READY':'BLOCKED';
+}
+async function insertCertificationMonitorCheckpoint(env:Env,cert:any,summary:any,policy:any,type:string,key:string,label:string,trigger:string){
+  const integrity=Number(summary.missing_production_pairs??0)+Number(summary.missing_candidate_pairs??0),status=certificationMonitorStatus(summary,policy);
+  const result=await env.DB.prepare(`INSERT OR IGNORE INTO live_shadow_monitor_checkpoints(live_shadow_certification_id,checkpoint_type,checkpoint_key,checkpoint_label,graded_pairs,distinct_dates,runtime_failures,pair_integrity_failures,hit_delta,brier_delta,abs_calibration_gap,monitor_status,snapshot_json,trigger_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(cert.live_shadow_certification_id,type,key,label,summary.graded_pairs??0,summary.distinct_dates??0,summary.runtime_failures??0,integrity,summary.hit_delta??null,summary.brier_delta??null,summary.abs_v14_calibration_gap??null,status,JSON.stringify({build:'9.3',summary,promotion_enabled:false}),trigger).run();
+  return Number(result.meta.changes??0)>0;
+}
+async function recordLiveShadowCertificationMonitoring(env:Env,scheduledTime:number,trigger='CRON'){
+  const data:any=await collectLiveShadowCertification(env); if(!data.session||!data.summary)return;
+  const policy=await env.DB.prepare(`SELECT * FROM promotion_policies WHERE promotion_policy_id=?`).bind(data.session.promotion_policy_id).first<Record<string,unknown>>(); if(!policy)return;
+  const summary=data.summary,date=chicagoDateString(scheduledTime),cert=data.session;
+  const dailyInserted=await insertCertificationMonitorCheckpoint(env,cert,summary,policy,'DAILY',`daily:${date}`,`Daily certification snapshot ${date}`,trigger);
+  if(dailyInserted){
+    await env.DB.prepare(`INSERT INTO live_shadow_certification_evidence(live_shadow_certification_id,evidence_uuid,evidence_date,paired_predictions,graded_pairs,missing_production_pairs,missing_candidate_pairs,runtime_failures,production_hit_rate,candidate_hit_rate,production_brier,candidate_brier,candidate_abs_calibration_gap,evidence_json,captured_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(cert.live_shadow_certification_id,crypto.randomUUID(),date,summary.paired_predictions??0,summary.graded_pairs??0,summary.missing_production_pairs??0,summary.missing_candidate_pairs??0,summary.runtime_failures??0,summary.v13?.hit_rate??null,summary.v14?.hit_rate??null,summary.v13?.brier??null,summary.v14?.brier??null,summary.abs_v14_calibration_gap??null,JSON.stringify({build:'9.3',trigger,status:certificationMonitorStatus(summary,policy),summary,promotion_enabled:false}),'cloudflare-cron@system.local').run();
+  }
+  for(const milestone of [50,100,150,200])if(Number(summary.graded_pairs??0)>=milestone)await insertCertificationMonitorCheckpoint(env,cert,summary,policy,'MILESTONE',`graded:${milestone}`,`${milestone} graded certification pairs`,trigger);
+  const integrity=Number(summary.missing_production_pairs??0)+Number(summary.missing_candidate_pairs??0);
+  const alerts=[Number(summary.runtime_failures??0)>0?{type:'RUNTIME_FAILURE',value:Number(summary.runtime_failures),message:`Certification window has ${summary.runtime_failures} runtime failure(s).`}:null,integrity>0?{type:'PAIR_INTEGRITY',value:integrity,message:`Certification window has ${integrity} pair-integrity failure(s).`}:null].filter(Boolean) as any[];
+  for(const a of alerts)await env.DB.prepare(`INSERT OR IGNORE INTO live_shadow_monitor_alerts(live_shadow_certification_id,alert_key,alert_type,severity,observed_value,message,details_json) VALUES(?,?,?,?,?,?,?)`).bind(cert.live_shadow_certification_id,`${a.type}:${a.value}`,a.type,'BLOCKING',a.value,a.message,JSON.stringify({build:'9.3',trigger,summary})).run();
+}
+async function collectCertificationMonitoring(env:Env,certData:any,policy:any){
+  const cert=certData?.session,summary=certData?.summary;if(!cert||!summary)return {status:'NO_ACTIVE_CERTIFICATION',progress:null,checkpoints:[],trends:[],alerts:[]};
+  const status=certificationMonitorStatus(summary,policy),minPairs=Number(policy?.min_live_graded_pairs??cert.min_live_graded_pairs??0),minDates=Number(policy?.min_live_distinct_dates??cert.min_live_distinct_dates??0);
+  const checkpoints=(await env.DB.prepare(`SELECT live_shadow_monitor_checkpoint_id,checkpoint_type,checkpoint_key,checkpoint_label,graded_pairs,distinct_dates,runtime_failures,pair_integrity_failures,hit_delta,brier_delta,abs_calibration_gap,monitor_status,captured_at,trigger_source FROM live_shadow_monitor_checkpoints WHERE live_shadow_certification_id=? ORDER BY captured_at DESC,live_shadow_monitor_checkpoint_id DESC LIMIT 60`).bind(cert.live_shadow_certification_id).all<CertificationMonitorCheckpoint>()).results??[];
+  const evidence=(await env.DB.prepare(`SELECT live_shadow_certification_evidence_id,evidence_date,captured_at,paired_predictions,graded_pairs,runtime_failures,production_hit_rate,candidate_hit_rate,production_brier,candidate_brier,candidate_abs_calibration_gap,captured_by FROM live_shadow_certification_evidence WHERE live_shadow_certification_id=? ORDER BY captured_at ASC,live_shadow_certification_evidence_id ASC LIMIT 120`).bind(cert.live_shadow_certification_id).all<Record<string,unknown>>()).results??[];
+  const alerts=(await env.DB.prepare(`SELECT live_shadow_monitor_alert_id,alert_type,severity,observed_value,message,created_at FROM live_shadow_monitor_alerts WHERE live_shadow_certification_id=? ORDER BY created_at DESC,live_shadow_monitor_alert_id DESC LIMIT 20`).bind(cert.live_shadow_certification_id).all<Record<string,unknown>>()).results??[];
+  return {status,progress:{graded_pairs:Number(summary.graded_pairs??0),min_graded_pairs:minPairs,pairs_remaining:Math.max(0,minPairs-Number(summary.graded_pairs??0)),distinct_dates:Number(summary.distinct_dates??0),min_distinct_dates:minDates,dates_remaining:Math.max(0,minDates-Number(summary.distinct_dates??0)),pair_progress:minPairs?Math.min(1,Number(summary.graded_pairs??0)/minPairs):0,date_progress:minDates?Math.min(1,Number(summary.distinct_dates??0)/minDates):0,next_milestone:[50,100,150,200].find(x=>Number(summary.graded_pairs??0)<x)??null},checkpoints,trends:evidence,alerts,promotion_enabled:false};
+}
+async function getLiveShadowCertification(env:Env):Promise<Response>{return json({release:'3.8',build:'9.3',certification_version:'live-shadow-certification-v1.3',...(await collectLiveShadowCertification(env)),promotion_enabled:false,note:'Build 9.2 is observation-only and cannot promote, demote, or change model roles.'});}
+async function captureLiveShadowCertificationEvidence(env:Env,identity:AccessIdentity):Promise<Response>{
+ const d:any=await collectLiveShadowCertification(env);if(!d.session||!d.summary)return json({error:'No active live shadow certification session.'},{status:409});
+ const s=d.summary,date=new Date().toISOString().slice(0,10);const ins=await env.DB.prepare(`INSERT INTO live_shadow_certification_evidence(live_shadow_certification_id,evidence_uuid,evidence_date,paired_predictions,graded_pairs,missing_production_pairs,missing_candidate_pairs,runtime_failures,production_hit_rate,candidate_hit_rate,production_brier,candidate_brier,candidate_abs_calibration_gap,evidence_json,captured_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(d.session.live_shadow_certification_id,crypto.randomUUID(),date,s.paired_predictions,s.graded_pairs,s.missing_production_pairs,s.missing_candidate_pairs,s.runtime_failures,s.v13?.hit_rate??null,s.v14?.hit_rate??null,s.v13?.brier??null,s.v14?.brier??null,s.abs_v14_calibration_gap??null,JSON.stringify({build:'9.3',status:d.status,summary:s,daily:d.daily,promotion_enabled:false}),identity.email??identity.subject??'unknown').run();
+ const evidenceId=Number(ins.meta.last_row_id),policy=await env.DB.prepare(`SELECT * FROM promotion_policies WHERE promotion_policy_id=?`).bind(d.session.promotion_policy_id).first<Record<string,unknown>>();
+ if(policy)await insertCertificationMonitorCheckpoint(env,d.session,s,policy,'MANUAL',`manual:${evidenceId}`,`Manual evidence checkpoint ${evidenceId}`,'ADMIN');
+ await audit(env,identity,'LIVE_SHADOW_CERTIFICATION_EVIDENCE_CAPTURED','MODEL_VERSION',Number(d.session.candidate_model_version_id),{live_shadow_certification_id:d.session.live_shadow_certification_id,evidence_id:evidenceId,promotion_enabled:false});return json({ok:true,evidence_id:evidenceId,certification_status:d.status,promotion_enabled:false});
+}
 
 async function collectPromotionReadinessV92(env:Env){
   const readiness:any=await collectPromotionReadiness(env);
@@ -11312,7 +11362,9 @@ async function collectPromotionReadinessV92(env:Env){
 }
 
 async function getPromotionReadiness(env:Env):Promise<Response>{
-  const {readiness,certification}=await collectPromotionReadinessV92(env);return json({release:'3.8',build:'9.2.6',governance_version:'promotion-gate-v1',...readiness,certification,promotion_enabled:false,note:'Build 9.2.6 promotion gates use indexed certification-eligible directional evidence inside the active window. Non-directional source rows are preserved as accounted exclusions, not runtime failures.'});
+  const {readiness,certification}=await collectPromotionReadinessV92(env);
+  const monitoring=await collectCertificationMonitoring(env,certification,readiness.policy);
+  return json({release:'3.8',build:'9.3',governance_version:'promotion-gate-v1',...readiness,certification,monitoring,promotion_enabled:false,note:'Build 9.3 adds automatic post-grading monitoring, immutable daily/milestone checkpoints, trend history, and blocking operational alerts. Promotion remains disabled.'});
 }
 
 async function capturePromotionReadiness(env:Env,identity:AccessIdentity):Promise<Response>{

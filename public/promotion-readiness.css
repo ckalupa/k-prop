@@ -95,3 +95,11 @@ button{max-width:100%;}
   #message{overflow-wrap:anywhere;word-break:break-word;}
   .hero-card>div,.panel-heading>*{min-width:0;max-width:100%;}
 }
+
+
+/* Build 9.3 certification monitoring */
+.muted{color:var(--muted,#8fa2b5);margin:.25rem 0 0}.monitor-clean{padding:.85rem 1rem;border:1px solid var(--border,#30333d);border-radius:10px}.alert-list{display:grid;gap:.75rem}.alert-list article{display:grid;gap:.25rem;padding:.85rem 1rem;border:1px solid #7f2f2f;border-radius:10px}.alert-list small{color:var(--muted,#8fa2b5)}
+@media(max-width:700px){
+ .monitor-checkpoints-table td:nth-child(1)::before{content:"Captured"}.monitor-checkpoints-table td:nth-child(2)::before{content:"Checkpoint"}.monitor-checkpoints-table td:nth-child(3)::before{content:"Graded"}.monitor-checkpoints-table td:nth-child(4)::before{content:"Dates"}.monitor-checkpoints-table td:nth-child(5)::before{content:"Status"}
+ .monitor-trends-table td:nth-child(1)::before{content:"Date"}.monitor-trends-table td:nth-child(2)::before{content:"Graded"}.monitor-trends-table td:nth-child(3)::before{content:"v13 hit"}.monitor-trends-table td:nth-child(4)::before{content:"v14 hit"}.monitor-trends-table td:nth-child(5)::before{content:"v13 Brier"}.monitor-trends-table td:nth-child(6)::before{content:"v14 Brier"}.monitor-trends-table td:nth-child(7)::before{content:"Calibration"}
+}
