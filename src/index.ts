@@ -11449,6 +11449,34 @@ async function collectPromotionReadinessV92(env:Env){
   return {readiness,certification};
 }
 
+
+type TechnicalReadinessFreezeRow={
+ technical_readiness_freeze_id:number;freeze_uuid:string;live_shadow_certification_id:number;promotion_policy_id:number;
+ production_model_version_id:number;candidate_model_version_id:number;decision_status:string;frozen_at:string;
+ live_graded_pairs:number;live_distinct_dates:number;runtime_failures:number;pair_integrity_failures:number;
+ live_hit_delta:number|null;live_brier_delta:number|null;candidate_abs_calibration_gap:number|null;gates_json:string;evidence_json:string;frozen_by:string|null;
+};
+async function getTechnicalReadinessFreeze(env:Env,certificationId?:number|null){
+ if(!certificationId)return null;
+ return await env.DB.prepare(`SELECT * FROM technical_readiness_freezes WHERE live_shadow_certification_id=? ORDER BY technical_readiness_freeze_id DESC LIMIT 1`).bind(certificationId).first<TechnicalReadinessFreezeRow>();
+}
+async function freezeTechnicalReadiness(env:Env,identity:AccessIdentity):Promise<Response>{
+ const {readiness,certification}:any=await collectPromotionReadinessV92(env);
+ if(!readiness?.policy||!readiness?.production||!readiness?.candidate||!certification?.session||!certification?.summary)return json({error:'Technical readiness cannot be frozen without an active certification and complete readiness evidence.'},{status:409});
+ const certId=Number(certification.session.live_shadow_certification_id),existing=await getTechnicalReadinessFreeze(env,certId);
+ if(existing)return json({ok:true,already_frozen:true,technical_readiness_freeze_id:existing.technical_readiness_freeze_id,decision_status:existing.decision_status,frozen_at:existing.frozen_at,promotion_enabled:false});
+ const s=certification.summary,integrity=Number(s.missing_production_pairs??0)+Number(s.missing_candidate_pairs??0);
+ const allEvaluable=(readiness.gates||[]).every((g:any)=>g.evaluable!==false);
+ const allPass=allEvaluable&&(readiness.gates||[]).every((g:any)=>Boolean(g.pass));
+ if(!s.sample_ready||!allEvaluable)return json({error:'Certification minimum sample is not complete; final technical readiness cannot be frozen yet.'},{status:409});
+ const decision=allPass?'TECHNICALLY_READY':'CERTIFICATION_FAILED';
+ const evidence={release:'3.8',build:'9.4',governance_version:'promotion-gate-v1',certification_started_at:certification.session.started_at,certification_status:certification.status,readiness_status:readiness.status,historical:readiness.historical,live:readiness.live,certification_summary:s,source_exclusions:s.source_excluded_predictions??0,pre_certification_runtime_failures:s.pre_certification_runtime_failures??0,clean_window:Boolean(s.clean_window),promotion_enabled:false};
+ const ins=await env.DB.prepare(`INSERT INTO technical_readiness_freezes(freeze_uuid,live_shadow_certification_id,promotion_policy_id,production_model_version_id,candidate_model_version_id,decision_status,live_graded_pairs,live_distinct_dates,runtime_failures,pair_integrity_failures,live_hit_delta,live_brier_delta,candidate_abs_calibration_gap,gates_json,evidence_json,frozen_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(),certId,readiness.policy.promotion_policy_id,readiness.production.model_version_id,readiness.candidate.model_version_id,decision,s.graded_pairs??0,s.distinct_dates??0,s.runtime_failures??0,integrity,s.hit_delta??null,s.brier_delta??null,s.abs_v14_calibration_gap??null,JSON.stringify(readiness.gates||[]),JSON.stringify(evidence),identity.email??identity.subject??'unknown').run();
+ const id=Number(ins.meta.last_row_id);
+ await audit(env,identity,'TECHNICAL_READINESS_FROZEN','MODEL_VERSION',Number(readiness.candidate.model_version_id),{technical_readiness_freeze_id:id,live_shadow_certification_id:certId,decision_status:decision,graded_pairs:s.graded_pairs,distinct_dates:s.distinct_dates,runtime_failures:s.runtime_failures,pair_integrity_failures:integrity,promotion_enabled:false});
+ return json({ok:true,technical_readiness_freeze_id:id,decision_status:decision,graded_pairs:s.graded_pairs,distinct_dates:s.distinct_dates,promotion_enabled:false});
+}
+
 async function getPromotionReadiness(env:Env):Promise<Response>{
   const first=await collectPromotionReadinessV92(env);
   // Build 9.3.1 reconciliation is idempotent (checkpoint keys are UNIQUE).
@@ -11459,7 +11487,8 @@ async function getPromotionReadiness(env:Env):Promise<Response>{
   }
   const {readiness,certification}=await collectPromotionReadinessV92(env);
   const monitoring=await collectCertificationMonitoring(env,certification,readiness.policy);
-  return json({release:'3.8',build:'9.3.1',governance_version:'promotion-gate-v1',...readiness,certification,monitoring,promotion_enabled:false,note:'Build 9.3.1 fixes automatic certification checkpoint capture and backfills missed milestones. Promotion remains disabled.'});
+  const final_readiness=await getTechnicalReadinessFreeze(env,certification?.session?.live_shadow_certification_id??null);
+  return json({release:'3.8',build:'9.4',governance_version:'promotion-gate-v1',...readiness,certification,monitoring,final_readiness,promotion_enabled:false,note:final_readiness?'Build 9.4 final technical readiness evidence is frozen and immutable. Promotion remains disabled.':'Build 9.4 can freeze the completed technical certification into an immutable final decision. Promotion remains disabled.'});
 }
 
 async function capturePromotionReadiness(env:Env,identity:AccessIdentity):Promise<Response>{
@@ -11682,6 +11711,7 @@ export default {
       }
       if (url.pathname === "/api/models/promotion/certification" && request.method === "GET") { return getLiveShadowCertification(env); }
       if (url.pathname === "/api/models/promotion/certification-evidence" && request.method === "POST") { return captureLiveShadowCertificationEvidence(env, identity!); }
+      if (url.pathname === "/api/models/promotion/freeze-technical-readiness" && request.method === "POST") { return freezeTechnicalReadiness(env, identity!); }
       if (url.pathname === "/api/models/promotion/readiness-snapshot" && request.method === "POST") {
         return capturePromotionReadiness(env, identity!);
       }
