@@ -5553,6 +5553,87 @@ async function getV14AdaptiveHistory(env:Env, boardDate:string, datasetBuildId:n
   `).bind(datasetBuildId,boardDate).all<V14AdaptiveHistoryRow>()).results ?? [];
 }
 
+type V14ProductionCalibration = {
+  raw_more_probability:number;
+  raw_less_probability:number;
+  calibrated_more_probability:number;
+  calibrated_less_probability:number;
+  preferred_side:"MORE"|"LESS";
+  decision:"PLAY"|"WATCH";
+  confidence_score:number;
+  confidence_label:string;
+  calibration:V14CalibrationSummary;
+};
+
+async function applyV14ProductionCalibration(
+  env:Env,
+  prop:ProcessPropRow,
+  modelVersionId:number,
+):Promise<V14ProductionCalibration|null>{
+  const recommendation=await env.DB.prepare(`
+    SELECT recommendation_id,estimated_over_rate,preferred_side,projection_status,score_explanation
+    FROM recommendations
+    WHERE prop_id=? AND model_version_id=?
+    LIMIT 1
+  `).bind(prop.prop_id,modelVersionId).first<{recommendation_id:number;estimated_over_rate:number|null;preferred_side:string|null;projection_status:string|null;score_explanation:string|null}>();
+  if(!recommendation) throw new Error(`v14 production recommendation is unavailable for prop ${prop.prop_id}.`);
+  const side=normalizePredictionSide(recommendation.preferred_side);
+  if(side==='NONE'||recommendation.estimated_over_rate===null)return null;
+  const rawMore=clamp(Number(recommendation.estimated_over_rate),0,1),rawLess=1-rawMore;
+  const rawPreferred=side==='MORE'?rawMore:rawLess;
+  const calibration=await getV14BaselineCalibration(env,prop.board_date,side,rawPreferred);
+  const preferred=calibration.calibrated_probability;
+  const calibratedMore=side==='MORE'?preferred:1-preferred,calibratedLess=1-calibratedMore;
+  const confidenceScore=Math.round(preferred*1000)/10;
+  const confidenceLabel=preferred>=0.60?'MODERATE':preferred>=0.55?'LEAN':'WATCH';
+  const decision=preferred>=0.54?'PLAY':'WATCH';
+  let prior:any={};try{prior=recommendation.score_explanation?JSON.parse(recommendation.score_explanation):{};}catch{prior={legacy_score_explanation:recommendation.score_explanation};}
+  const explanation={...prior,v14_production:{policy:'v14-baseline-calibrated-v1',raw_preferred_probability:rawPreferred,calibrated_preferred_probability:preferred,calibration,play_threshold:0.54,board_date:prop.board_date}};
+  await env.DB.prepare(`
+    UPDATE recommendations
+    SET estimated_over_rate=?,
+        confidence_score=?,
+        confidence_band=?,
+        decision_tier=?,
+        model_decision=?,
+        final_decision=?,
+        recommendation_score=?,
+        recommendation_band=?,
+        score_explanation=?,
+        generated_at=CURRENT_TIMESTAMP
+    WHERE recommendation_id=?
+  `).bind(calibratedMore,confidenceScore,confidenceLabel,decision==='PLAY'?'SECONDARY':'WATCH',decision,decision,confidenceScore,decision,JSON.stringify(explanation),recommendation.recommendation_id).run();
+  return {raw_more_probability:rawMore,raw_less_probability:rawLess,calibrated_more_probability:calibratedMore,calibrated_less_probability:calibratedLess,preferred_side:side,decision,confidence_score:confidenceScore,confidence_label:confidenceLabel,calibration};
+}
+
+async function captureV14ProductionPredictionLedger(
+  env:Env,
+  prop:ProcessPropRow,
+  model:RuntimeModelVersion,
+  propFeatureSnapshotId:number|null,
+  v14:V14ProductionCalibration,
+):Promise<void>{
+  const recommendation=await env.DB.prepare(`SELECT recommendation_id,projected_strikeouts,model_edge,projection_status,generated_at FROM recommendations WHERE prop_id=? AND model_version_id=? LIMIT 1`).bind(prop.prop_id,model.model_version_id).first<{recommendation_id:number;projected_strikeouts:number|null;model_edge:number|null;projection_status:string|null;generated_at:string|null}>();
+  if(!recommendation)throw new Error(`v14 production recommendation is unavailable for ledger capture on prop ${prop.prop_id}.`);
+  const feature=await env.DB.prepare(`SELECT feature_snapshot_id FROM feature_snapshots WHERE prop_id=? AND model_version_id=? ORDER BY snapshot_time DESC,feature_snapshot_id DESC LIMIT 1`).bind(prop.prop_id,model.model_version_id).first<{feature_snapshot_id:number}>();
+  await env.DB.prepare(`
+    INSERT INTO model_predictions(
+      prediction_uuid,prop_id,model_version_id,feature_snapshot_id,prop_feature_snapshot_id,prediction_mode,prediction_status,
+      predicted_at,information_cutoff_at,prop_line,projected_strikeouts,raw_more_probability,raw_less_probability,
+      calibrated_more_probability,calibrated_less_probability,preferred_side,model_edge,decision,confidence_score,
+      confidence_label,data_quality_status,source_fingerprint,input_hash,output_json
+    ) VALUES(?,?,?,?,?,'PRODUCTION','COMPLETE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    crypto.randomUUID(),prop.prop_id,model.model_version_id,feature?.feature_snapshot_id??null,propFeatureSnapshotId,
+    Number(prop.strikeout_line),recommendation.projected_strikeouts,v14.raw_more_probability,v14.raw_less_probability,
+    v14.calibrated_more_probability,v14.calibrated_less_probability,v14.preferred_side,recommendation.model_edge,v14.decision,
+    v14.confidence_score,v14.confidence_label,recommendation.projection_status==='FULL'?'COMPLETE':'PARTIAL',
+    `v14-production:${prop.prop_id}:${recommendation.generated_at??'unknown'}`,
+    `${prop.prop_id}:${model.model_version_id}:${recommendation.generated_at??'unknown'}:v14-baseline-production-v1`,
+    JSON.stringify({adapter:'v14_baseline_calibrated_v1',production:true,model_version_id:model.model_version_id,recommendation_id:recommendation.recommendation_id,calibration:v14.calibration,rules:{training_cutoff:`board_date < ${prop.board_date}`,play_threshold:0.54}})
+  ).run();
+}
+
 async function captureV14BaselinePredictionLedger(
   env: Env,
   prop: ProcessPropRow,
@@ -5933,6 +6014,11 @@ async function processBoard(
   for (const prop of props.results) {
     try {
       await processProp(env, productionModel.model_version_id, prop);
+      const isV14Production = productionModel.version_name === "v14-baseline-challenger" &&
+        productionModel.code_identifier === "shadow-adapter:v14-baseline-calibrated-v1";
+      const v14ProductionCalibration = isV14Production
+        ? await applyV14ProductionCalibration(env, prop, productionModel.model_version_id)
+        : null;
       processed += 1;
 
       // Release 3.2 Build 3.3.1 safety rule: feature-store bookkeeping is
@@ -5954,14 +6040,18 @@ async function processBoard(
       }
 
       try {
-        await capturePredictionLedger(
-          env,
-          prop,
-          productionModel.model_version_id,
-          productionModel,
-          "PRODUCTION",
-          propFeatureSnapshotId,
-        );
+        if (isV14Production && v14ProductionCalibration) {
+          await captureV14ProductionPredictionLedger(env, prop, productionModel, propFeatureSnapshotId, v14ProductionCalibration);
+        } else {
+          await capturePredictionLedger(
+            env,
+            prop,
+            productionModel.model_version_id,
+            productionModel,
+            "PRODUCTION",
+            propFeatureSnapshotId,
+          );
+        }
         productionPredictions += 1;
       } catch (error) {
         warnings.push({
@@ -11477,6 +11567,54 @@ async function freezeTechnicalReadiness(env:Env,identity:AccessIdentity):Promise
  return json({ok:true,technical_readiness_freeze_id:id,decision_status:decision,graded_pairs:s.graded_pairs,distinct_dates:s.distinct_dates,promotion_enabled:false});
 }
 
+type ManualPromotionRow={
+ manual_model_promotion_id:number;promotion_uuid:string;technical_readiness_freeze_id:number;promotion_policy_id:number;
+ previous_production_model_version_id:number;promoted_model_version_id:number;promotion_status:string;promoted_at:string;promoted_by:string;
+ confirmation_text:string;pre_state_json:string;post_state_json:string;rollback_json:string;
+};
+async function getManualPromotion(env:Env,freezeId?:number|null):Promise<ManualPromotionRow|null>{
+ if(!freezeId)return null;
+ return await env.DB.prepare(`SELECT * FROM manual_model_promotions WHERE technical_readiness_freeze_id=? ORDER BY manual_model_promotion_id DESC LIMIT 1`).bind(freezeId).first<ManualPromotionRow>();
+}
+async function promoteCertifiedCandidate(request:Request,env:Env,identity:AccessIdentity):Promise<Response>{
+ const email=requireEmail(identity);
+ const body=await request.json<{technical_readiness_freeze_id?:number;confirmation_text?:string;acknowledge_rollback?:boolean}>();
+ const freezeId=Number(body.technical_readiness_freeze_id??0);
+ if(!Number.isInteger(freezeId)||freezeId<=0)return json({error:'A valid technical_readiness_freeze_id is required.'},{status:400});
+ const freeze=await env.DB.prepare(`SELECT * FROM technical_readiness_freezes WHERE technical_readiness_freeze_id=?`).bind(freezeId).first<TechnicalReadinessFreezeRow>();
+ if(!freeze)return json({error:'Technical readiness freeze not found.'},{status:404});
+ if(freeze.decision_status!=='TECHNICALLY_READY')return json({error:'Only a TECHNICALLY_READY immutable freeze can be promoted.'},{status:409});
+ const existing=await getManualPromotion(env,freezeId);
+ if(existing)return json({ok:true,already_promoted:true,manual_model_promotion_id:existing.manual_model_promotion_id,promotion_status:existing.promotion_status,promoted_at:existing.promoted_at});
+ const previous=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,is_active,execution_enabled,execution_priority,code_identifier FROM model_versions WHERE model_version_id=?`).bind(freeze.production_model_version_id).first<Record<string,unknown>>();
+ const candidate=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,is_active,execution_enabled,execution_priority,code_identifier,shadow_source_model_version_id FROM model_versions WHERE model_version_id=?`).bind(freeze.candidate_model_version_id).first<Record<string,unknown>>();
+ if(!previous||!candidate)return json({error:'Frozen production/candidate model records are unavailable.'},{status:409});
+ if(String(previous.model_role)!=='PRODUCTION'||String(previous.lifecycle_status)!=='ACTIVE')return json({error:'The frozen production model is no longer the active production model. Promotion aborted.'},{status:409});
+ if(String(candidate.version_name)!=='v14-baseline-challenger'||String(candidate.model_role)!=='CHALLENGER'||String(candidate.lifecycle_status)!=='ACTIVE')return json({error:'The frozen v14 candidate is no longer the active challenger. Promotion aborted.'},{status:409});
+ if(String(candidate.code_identifier)!=='shadow-adapter:v14-baseline-calibrated-v1')return json({error:'Candidate runtime identity does not match the certified v14 baseline. Promotion aborted.'},{status:409});
+ const expected=`PROMOTE ${String(candidate.version_name)}`;
+ if(String(body.confirmation_text??'').trim()!==expected)return json({error:`Confirmation text must exactly match: ${expected}`},{status:400});
+ if(body.acknowledge_rollback!==true)return json({error:'Rollback acknowledgement is required.'},{status:400});
+ const currentProdCount=await env.DB.prepare(`SELECT COUNT(*) n FROM model_versions WHERE model_role='PRODUCTION' AND lifecycle_status='ACTIVE'`).first<{n:number}>();
+ if(Number(currentProdCount?.n??0)!==1)return json({error:'Exactly one active production model must exist before promotion.'},{status:409});
+ const preState={previous,candidate,technical_readiness_freeze_id:freezeId,freeze_uuid:freeze.freeze_uuid,decision_status:freeze.decision_status};
+ const promotionUuid=crypto.randomUUID();
+ const rollback={rollback_model_version_id:Number(previous.model_version_id),rollback_version_name:String(previous.version_name),promoted_model_version_id:Number(candidate.model_version_id),promoted_version_name:String(candidate.version_name),strategy:'Build 9.6 controlled rollback endpoint required; no automatic rollback in Build 9.5'};
+ const result=await env.DB.batch([
+   env.DB.prepare(`UPDATE model_versions SET model_role='ARCHIVED',is_active=0,execution_enabled=0,execution_priority=1000,last_execution_status='DISABLED',updated_at=CURRENT_TIMESTAMP WHERE model_version_id=? AND model_role='PRODUCTION' AND lifecycle_status='ACTIVE'`).bind(freeze.production_model_version_id),
+   env.DB.prepare(`UPDATE model_versions SET model_role='PRODUCTION',lifecycle_status='ACTIVE',is_active=1,execution_enabled=1,execution_priority=0,activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP),retired_at=NULL,last_execution_status=COALESCE(last_execution_status,'SUCCEEDED'),last_execution_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE model_version_id=? AND model_role='CHALLENGER' AND lifecycle_status='ACTIVE'`).bind(freeze.candidate_model_version_id),
+   env.DB.prepare(`INSERT INTO manual_model_promotions(promotion_uuid,technical_readiness_freeze_id,promotion_policy_id,previous_production_model_version_id,promoted_model_version_id,promotion_status,promoted_by,confirmation_text,pre_state_json,post_state_json,rollback_json) VALUES(?,?,?,?,?,'COMPLETED',?,?,?,?,?)`).bind(promotionUuid,freezeId,freeze.promotion_policy_id,freeze.production_model_version_id,freeze.candidate_model_version_id,email,expected,JSON.stringify(preState),JSON.stringify({production_model_version_id:freeze.candidate_model_version_id,previous_production_model_version_id:freeze.production_model_version_id}),JSON.stringify(rollback)),
+ ]);
+ const prevChanges=Number(result[0]?.meta?.changes??0),candChanges=Number(result[1]?.meta?.changes??0);
+ if(prevChanges!==1||candChanges!==1)throw new Error(`Promotion state transition changed unexpected row counts: previous=${prevChanges}, candidate=${candChanges}.`);
+ const post=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,is_active,execution_enabled,execution_priority FROM model_versions WHERE model_version_id IN (?,?) ORDER BY model_version_id`).bind(freeze.production_model_version_id,freeze.candidate_model_version_id).all<Record<string,unknown>>();
+ const activeProd=await env.DB.prepare(`SELECT model_version_id,version_name FROM model_versions WHERE model_role='PRODUCTION' AND lifecycle_status='ACTIVE' AND execution_enabled=1`).all<Record<string,unknown>>();
+ if(activeProd.results.length!==1||Number(activeProd.results[0]?.model_version_id)!==freeze.candidate_model_version_id)throw new Error('Post-promotion production-role verification failed.');
+ const promotion=await getManualPromotion(env,freezeId);
+ await audit(env,identity,'MODEL_MANUALLY_PROMOTED','MODEL_VERSION',freeze.candidate_model_version_id,{manual_model_promotion_id:promotion?.manual_model_promotion_id??null,technical_readiness_freeze_id:freezeId,previous_production_model_version_id:freeze.production_model_version_id,promoted_model_version_id:freeze.candidate_model_version_id,confirmation_text:expected,rollback,post_state:post.results});
+ return json({ok:true,manual_model_promotion_id:promotion?.manual_model_promotion_id??null,promotion_status:'COMPLETED',promoted_at:promotion?.promoted_at??null,production:{model_version_id:freeze.candidate_model_version_id,version_name:candidate.version_name},rollback_model:{model_version_id:freeze.production_model_version_id,version_name:previous.version_name},next:'Build 9.6 post-promotion guardrail window'});
+}
+
 async function getPromotionReadiness(env:Env):Promise<Response>{
   const first=await collectPromotionReadinessV92(env);
   // Build 9.3.1 reconciliation is idempotent (checkpoint keys are UNIQUE).
@@ -11488,7 +11626,9 @@ async function getPromotionReadiness(env:Env):Promise<Response>{
   const {readiness,certification}=await collectPromotionReadinessV92(env);
   const monitoring=await collectCertificationMonitoring(env,certification,readiness.policy);
   const final_readiness=await getTechnicalReadinessFreeze(env,certification?.session?.live_shadow_certification_id??null);
-  return json({release:'3.8',build:'9.4',governance_version:'promotion-gate-v1',...readiness,certification,monitoring,final_readiness,promotion_enabled:false,note:final_readiness?'Build 9.4 final technical readiness evidence is frozen and immutable. Promotion remains disabled.':'Build 9.4 can freeze the completed technical certification into an immutable final decision. Promotion remains disabled.'});
+  const manual_promotion=await getManualPromotion(env,final_readiness?.technical_readiness_freeze_id??null);
+  const current_production=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,execution_enabled FROM model_versions WHERE model_role='PRODUCTION' AND lifecycle_status='ACTIVE' ORDER BY model_version_id DESC LIMIT 1`).first<Record<string,unknown>>();
+  return json({release:'3.8',build:'9.5',governance_version:'promotion-gate-v1',...readiness,current_production,certification,monitoring,final_readiness,manual_promotion,promotion_enabled:Boolean(final_readiness?.decision_status==='TECHNICALLY_READY'&&!manual_promotion),note:manual_promotion?'Build 9.5 manual promotion is complete. v14 is production; the frozen v13 model is retained as the rollback target.':'Build 9.5 exposes a guarded manual promotion control only after an immutable TECHNICALLY_READY freeze. No automatic promotion occurs.'});
 }
 
 async function capturePromotionReadiness(env:Env,identity:AccessIdentity):Promise<Response>{
@@ -11712,6 +11852,7 @@ export default {
       if (url.pathname === "/api/models/promotion/certification" && request.method === "GET") { return getLiveShadowCertification(env); }
       if (url.pathname === "/api/models/promotion/certification-evidence" && request.method === "POST") { return captureLiveShadowCertificationEvidence(env, identity!); }
       if (url.pathname === "/api/models/promotion/freeze-technical-readiness" && request.method === "POST") { return freezeTechnicalReadiness(env, identity!); }
+      if (url.pathname === "/api/models/promotion/promote-certified-candidate" && request.method === "POST") { return promoteCertifiedCandidate(request, env, identity!); }
       if (url.pathname === "/api/models/promotion/readiness-snapshot" && request.method === "POST") {
         return capturePromotionReadiness(env, identity!);
       }
