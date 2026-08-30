@@ -8376,6 +8376,82 @@ async function settleTrackedPlays(env: Env, boardId?: number): Promise<{ slips_c
   return { slips_checked: slips.results.length, slips_settled: settled, needs_review: review };
 }
 
+
+type V14TrackedPlayReplayRow = {
+  leg_id:number; slip_id:number; prop_id:number; board_date:string; pitcher_name:string; opponent:string|null;
+  strikeout_line:number; tracked_side:string; tracked_decision:string|null; tracked_confidence:number|null;
+  leg_result:string; recommendation_id:number|null; estimated_over_rate:number|null; model_edge:number|null;
+  source_model_version:string|null;
+};
+
+function replayOutcomeStats(rows:Array<Record<string,unknown>>, qualifiedOnly:boolean|null){
+  const selected=rows.filter(r=>qualifiedOnly===null || Boolean(r.v14_qualified)===qualifiedOnly);
+  let wins=0,losses=0,pushes=0,voids=0,v14Brier=0,sourceBrier=0,brierN=0;
+  const dates=new Set<string>();
+  for(const r of selected){
+    const result=String(r.leg_result??'').toUpperCase();
+    if(r.board_date)dates.add(String(r.board_date).slice(0,10));
+    if(result==='WIN')wins++; else if(result==='LOSS')losses++; else if(result==='PUSH')pushes++; else if(result==='VOID')voids++;
+    if(result==='WIN'||result==='LOSS'){
+      const y=result==='WIN'?1:0;
+      const vp=Number(r.v14_probability); const sp=Number(r.source_probability);
+      if(Number.isFinite(vp)&&Number.isFinite(sp)){
+        v14Brier+=(vp-y)*(vp-y); sourceBrier+=(sp-y)*(sp-y); brierN++;
+      }
+    }
+  }
+  const graded=wins+losses;
+  return {rows:selected.length,graded,wins,losses,pushes,voids,hit_rate:graded?wins/graded:null,distinct_dates:dates.size,
+    v14_brier:brierN?v14Brier/brierN:null,source_brier:brierN?sourceBrier/brierN:null};
+}
+
+async function getTrackedPlaysV14Replay(env:Env):Promise<Response>{
+  const raw=(await env.DB.prepare(`
+    SELECT l.leg_id,l.slip_id,l.prop_id,b.board_date,l.pitcher_name,l.opponent,l.strikeout_line,
+      UPPER(l.preferred_side) tracked_side,l.model_decision tracked_decision,l.confidence_score tracked_confidence,
+      l.leg_result,l.recommendation_id,r.estimated_over_rate,r.model_edge,mv.version_name source_model_version
+    FROM play_slip_legs l
+    JOIN play_slips s ON s.slip_id=l.slip_id
+    JOIN boards b ON b.board_id=s.board_id
+    LEFT JOIN recommendations r ON r.recommendation_id=l.recommendation_id
+    LEFT JOIN model_versions mv ON mv.model_version_id=r.model_version_id
+    WHERE UPPER(l.preferred_side) IN ('MORE','LESS')
+      AND l.leg_result IN ('WIN','LOSS','PUSH','VOID')
+    ORDER BY b.board_date,l.leg_id
+  `).all<V14TrackedPlayReplayRow>()).results??[];
+
+  // Model-performance replay counts a prop once even if it appeared on multiple tracked slips.
+  const unique=new Map<number,V14TrackedPlayReplayRow>();
+  for(const r of raw)if(!unique.has(Number(r.prop_id)))unique.set(Number(r.prop_id),r);
+  const out:Array<Record<string,unknown>>=[];
+  for(const r of unique.values()){
+    const side=String(r.tracked_side).toUpperCase() as 'MORE'|'LESS';
+    if(side!=='MORE'&&side!=='LESS')continue;
+    const over=Number(r.estimated_over_rate);
+    if(!Number.isFinite(over)){
+      out.push({...r,replay_status:'NO_SOURCE_PROBABILITY',v14_qualified:false});
+      continue;
+    }
+    const sourceProbability=Math.max(0.5,Math.min(0.999999,side==='MORE'?over:1-over));
+    const cal=await getV14BaselineCalibration(env,String(r.board_date).slice(0,10),side,sourceProbability);
+    const v14Probability=Number(cal.calibrated_probability);
+    out.push({...r,replay_status:'REPLAYED',source_probability:sourceProbability,v14_probability:v14Probability,
+      v14_decision:v14Probability>=0.54?'PLAY':'WATCH',v14_qualified:v14Probability>=0.54,
+      v14_training_rows:cal.training_rows,v14_fallback_level:cal.fallback_level});
+  }
+  const usable=out.filter(r=>r.replay_status==='REPLAYED');
+  const dailyMap=new Map<string,Array<Record<string,unknown>>>();
+  for(const r of usable){const d=String(r.board_date).slice(0,10);dailyMap.set(d,[...(dailyMap.get(d)??[]),r]);}
+  const daily=[...dailyMap.entries()].map(([date,rows])=>({date,all:replayOutcomeStats(rows,null),v14_play:replayOutcomeStats(rows,true),filtered:replayOutcomeStats(rows,false)}));
+  return json({release:'3.8',build:'9.3.2',replay_version:'tracked-plays-v14-baseline-replay-v1',research_only:true,
+    production_models_changed:false,certification_evidence_changed:false,
+    anti_lookahead:'Each v14 calibration uses certified historical rows with board_date strictly before the tracked play date.',
+    selection_note:'v14 baseline preserves the tracked MORE/LESS side; this replay tests whether the v14 >=54% PLAY filter improves selection.',
+    tracked_legs:raw.length,unique_props:unique.size,replayed_props:usable.length,unreplayed_props:out.length-usable.length,
+    summary:{all_tracked:replayOutcomeStats(usable,null),v14_play:replayOutcomeStats(usable,true),v14_filtered_watch:replayOutcomeStats(usable,false)},
+    daily,rows:[...usable].reverse(),unreplayed:out.filter(r=>r.replay_status!=='REPLAYED')});
+}
+
 async function getPlaysPage(env: Env, url: URL): Promise<Response> {
   const boardIdRaw = Number(url.searchParams.get("board_id") ?? 0);
   const boardId = Number.isInteger(boardIdRaw) && boardIdRaw > 0 ? boardIdRaw : null;
@@ -11410,6 +11486,9 @@ export default {
         "/plays.html",
         "/plays.js",
         "/plays.css",
+        "/plays-v14-replay.html",
+        "/plays-v14-replay.js",
+        "/plays-v14-replay.css",
         "/model-control.html",
         "/model-control.js",
         "/model-control.css",
@@ -11560,6 +11639,9 @@ export default {
 
       if (url.pathname === "/api/plays" && request.method === "GET") {
         return getPlaysPage(env, url);
+      }
+      if (url.pathname === "/api/plays/v14-replay" && request.method === "GET") {
+        return getTrackedPlaysV14Replay(env);
       }
       if (url.pathname === "/api/play-slips" && request.method === "POST") {
         return createPlaySlip(request, env, identity!);
