@@ -243,6 +243,18 @@ async function getDashboard(env: Env, url: URL): Promise<Response> {
     LIMIT 60
   `).all();
 
+  const activeProductionModelPromise = env.DB.prepare(`
+    SELECT model_version_id, version_name, code_identifier
+    FROM model_versions
+    WHERE model_role = 'PRODUCTION' AND execution_enabled = 1
+    ORDER BY execution_priority ASC, model_version_id DESC
+    LIMIT 1
+  `).first<{
+    model_version_id: number;
+    version_name: string;
+    code_identifier: string | null;
+  }>();
+
   const modelRecordsPromise = env.DB.prepare(`
     SELECT
       mv.version_name,
@@ -367,17 +379,19 @@ async function getDashboard(env: Env, url: URL): Promise<Response> {
   `).all();
 
   if (!board) {
-    const [workflowBoards, modelRecords, recentResults, yesterdayBoard, lifetimeRecords] = await Promise.all([
+    const [workflowBoards, modelRecords, recentResults, yesterdayBoard, lifetimeRecords, activeProductionModel] = await Promise.all([
       workflowBoardsPromise,
       modelRecordsPromise,
       recentResultsPromise,
       yesterdayBoardPromise,
       lifetimeRecordsPromise,
+      activeProductionModelPromise,
     ]);
     return json({
       board: null,
       summary: { props: 0, plays: 0, leans: 0, watches: 0, passes: 0 },
       recommendations: [],
+      active_production_model: activeProductionModel ?? null,
       workflow_boards: workflowBoards.results,
       model_records: modelRecords.results,
       recent_results: recentResults.results,
@@ -734,9 +748,12 @@ async function getDashboard(env: Env, url: URL): Promise<Response> {
     };
   }
 
+  const activeProductionModel = await activeProductionModelPromise;
+
   return json({
     board,
     summary,
+    active_production_model: activeProductionModel ?? null,
     recommendations: recommendations.results,
     workflow_boards: workflowBoards.results,
     model_records: modelRecords.results,

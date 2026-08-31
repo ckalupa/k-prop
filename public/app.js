@@ -46,6 +46,14 @@ function formatTimestamp(value) {
   }).format(date);
 }
 
+
+function shortModelName(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "—";
+  const match = raw.match(/^v\d+(?:\.\d+)?/i);
+  return match ? match[0] : raw;
+}
+
 function badgeClass(value) {
   return String(value ?? "").toLowerCase().replaceAll(" ", "-");
 }
@@ -323,6 +331,9 @@ async function loadDashboard(boardId = state.selectedBoardId) {
     $("#board-name").textContent = board.board_name ?? "No board";
     $("#board-date").textContent = board.board_date ?? "—";
     $("#board-status").textContent = board.status ?? "—";
+    const productionModel = data.active_production_model?.version_name ?? "";
+    $("#active-model").textContent = shortModelName(productionModel);
+    $("#active-model").title = productionModel || "Active production model unavailable";
     $("#grading-status").textContent = meta.grading_status ?? "—";
     $("#last-updated").textContent = formatTimestamp(meta.last_updated_at ?? meta.generated_at);
 
