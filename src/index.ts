@@ -5945,6 +5945,33 @@ async function updateModelRuntime(
   return json({ ok: true, model_version_id: modelVersionId, execution_enabled: body.execution_enabled });
 }
 
+
+async function recordPostPromotionGuardrailFailure(
+  env: Env,
+  prop: ProcessPropRow,
+  model: RuntimeModelVersion,
+  stage: string,
+  error: unknown,
+): Promise<void> {
+  if (model.version_name !== "v14-baseline-challenger" || model.model_role !== "PRODUCTION") return;
+  const promotion = await env.DB.prepare(`
+    SELECT manual_model_promotion_id, promoted_model_version_id, promoted_at
+    FROM manual_model_promotions
+    WHERE promotion_status='COMPLETED' AND promoted_model_version_id=?
+    ORDER BY manual_model_promotion_id DESC LIMIT 1
+  `).bind(model.model_version_id).first<{manual_model_promotion_id:number;promoted_model_version_id:number;promoted_at:string}>();
+  if (!promotion) return;
+  const message = error instanceof Error ? error.message : String(error);
+  await env.DB.prepare(`
+    INSERT INTO post_promotion_guardrail_failures(
+      failure_uuid,manual_model_promotion_id,model_version_id,prop_id,board_date,failure_stage,error_message
+    ) VALUES(?,?,?,?,?,?,?)
+  `).bind(
+    crypto.randomUUID(),promotion.manual_model_promotion_id,model.model_version_id,
+    prop.prop_id,prop.board_date,stage,message.slice(0,2000),
+  ).run();
+}
+
 async function processBoard(
   env: Env,
   identity: AccessIdentity,
@@ -6054,6 +6081,7 @@ async function processBoard(
         }
         productionPredictions += 1;
       } catch (error) {
+        try { await recordPostPromotionGuardrailFailure(env, prop, productionModel, "PRODUCTION_LEDGER", error); } catch (guardrailError) { console.error("POST_PROMOTION_GUARDRAIL failure capture failed:", guardrailError); }
         warnings.push({
           prop_id: prop.prop_id,
           pitcher: prop.canonical_name,
@@ -6088,6 +6116,7 @@ async function processBoard(
         }
       }
     } catch (error) {
+      try { await recordPostPromotionGuardrailFailure(env, prop, productionModel, "PRODUCTION", error); } catch (guardrailError) { console.error("POST_PROMOTION_GUARDRAIL failure capture failed:", guardrailError); }
       warnings.push({
         prop_id: prop.prop_id,
         pitcher: prop.canonical_name,
@@ -11599,7 +11628,7 @@ async function promoteCertifiedCandidate(request:Request,env:Env,identity:Access
  if(Number(currentProdCount?.n??0)!==1)return json({error:'Exactly one active production model must exist before promotion.'},{status:409});
  const preState={previous,candidate,technical_readiness_freeze_id:freezeId,freeze_uuid:freeze.freeze_uuid,decision_status:freeze.decision_status};
  const promotionUuid=crypto.randomUUID();
- const rollback={rollback_model_version_id:Number(previous.model_version_id),rollback_version_name:String(previous.version_name),promoted_model_version_id:Number(candidate.model_version_id),promoted_version_name:String(candidate.version_name),strategy:'Build 9.6 controlled rollback endpoint required; no automatic rollback in Build 9.5'};
+ const rollback={rollback_model_version_id:Number(previous.model_version_id),rollback_version_name:String(previous.version_name),promoted_model_version_id:Number(candidate.model_version_id),promoted_version_name:String(candidate.version_name),strategy:'Build 9.7 controlled rollback endpoint required; no automatic rollback in Build 9.5'};
  const result=await env.DB.batch([
    env.DB.prepare(`UPDATE model_versions SET model_role='ARCHIVED',is_active=0,execution_enabled=0,execution_priority=1000,last_execution_status='DISABLED',updated_at=CURRENT_TIMESTAMP WHERE model_version_id=? AND model_role='PRODUCTION' AND lifecycle_status='ACTIVE'`).bind(freeze.production_model_version_id),
    env.DB.prepare(`UPDATE model_versions SET model_role='PRODUCTION',lifecycle_status='ACTIVE',is_active=1,execution_enabled=1,execution_priority=0,activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP),retired_at=NULL,last_execution_status=COALESCE(last_execution_status,'SUCCEEDED'),last_execution_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE model_version_id=? AND model_role='CHALLENGER' AND lifecycle_status='ACTIVE'`).bind(freeze.candidate_model_version_id),
@@ -11615,6 +11644,91 @@ async function promoteCertifiedCandidate(request:Request,env:Env,identity:Access
  return json({ok:true,manual_model_promotion_id:promotion?.manual_model_promotion_id??null,promotion_status:'COMPLETED',promoted_at:promotion?.promoted_at??null,production:{model_version_id:freeze.candidate_model_version_id,version_name:candidate.version_name},rollback_model:{model_version_id:freeze.production_model_version_id,version_name:previous.version_name},next:'Build 9.6 post-promotion guardrail window'});
 }
 
+
+type PostPromotionGuardrailWindowRow={
+ post_promotion_guardrail_window_id:number;guardrail_uuid:string;manual_model_promotion_id:number;
+ promoted_model_version_id:number;rollback_model_version_id:number;started_at:string;
+ min_health_graded_pairs:number;min_health_distinct_dates:number;min_full_graded_pairs:number;min_full_distinct_dates:number;
+ max_hit_rate_drop:number;max_brier_increase:number;max_abs_calibration_gap:number;created_at:string;policy_json:string;
+};
+
+function guardrailPerformance(rows:Record<string,unknown>[]){
+ let wins=0,brier=0,probSum=0,n=0;
+ for(const r of rows){
+  const result=String(r.result??'').toUpperCase(),side=String(r.preferred_side??'').toUpperCase();
+  if(!['OVER','UNDER'].includes(result)||!['MORE','LESS'].includes(side))continue;
+  const y=((side==='MORE'&&result==='OVER')||(side==='LESS'&&result==='UNDER'))?1:0;
+  const p=Math.max(0,Math.min(1,Number(r.preferred_probability??0.5)));
+  wins+=y;brier+=(p-y)*(p-y);probSum+=p;n++;
+ }
+ const hit=n?wins/n:null,avg=n?probSum/n:null;
+ return {rows:n,wins,losses:n-wins,hit_rate:hit,brier:n?brier/n:null,avg_probability:avg,calibration_gap:hit!=null&&avg!=null?avg-hit:null};
+}
+
+async function collectPostPromotionGuardrail(env:Env,manualPromotion:ManualPromotionRow|null,freeze:TechnicalReadinessFreezeRow|null){
+ if(!manualPromotion)return {status:'NOT_STARTED',window:null,summary:null,daily:[],failures:[],automatic_rollback:false};
+ const window=await env.DB.prepare(`SELECT * FROM post_promotion_guardrail_windows WHERE manual_model_promotion_id=? LIMIT 1`).bind(manualPromotion.manual_model_promotion_id).first<PostPromotionGuardrailWindowRow>();
+ if(!window)return {status:'WINDOW_MISSING',window:null,summary:null,daily:[],failures:[],automatic_rollback:false};
+ const production=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,execution_enabled,last_execution_status,last_execution_error FROM model_versions WHERE model_version_id=?`).bind(window.promoted_model_version_id).first<Record<string,unknown>>();
+ const rollback=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,execution_enabled FROM model_versions WHERE model_version_id=?`).bind(window.rollback_model_version_id).first<Record<string,unknown>>();
+ const rows=(await env.DB.prepare(`
+   WITH latest AS (
+     SELECT mp.* FROM model_predictions mp
+     JOIN (
+       SELECT prop_id,MAX(model_prediction_id) model_prediction_id
+       FROM model_predictions
+       WHERE model_version_id=? AND prediction_mode='PRODUCTION' AND prediction_status='COMPLETE' AND predicted_at>=?
+       GROUP BY prop_id
+     ) x ON x.model_prediction_id=mp.model_prediction_id
+   )
+   SELECT l.model_prediction_id,l.prop_id,l.predicted_at,b.board_date,pr.result,
+     l.preferred_side,l.decision,
+     CASE WHEN UPPER(l.preferred_side)='MORE' THEN COALESCE(l.calibrated_more_probability,l.raw_more_probability)
+          WHEN UPPER(l.preferred_side)='LESS' THEN COALESCE(l.calibrated_less_probability,l.raw_less_probability) END preferred_probability
+   FROM latest l
+   JOIN props p ON p.prop_id=l.prop_id
+   JOIN boards b ON b.board_id=p.board_id
+   LEFT JOIN prop_results pr ON pr.prop_id=l.prop_id AND pr.result_status<>'PENDING'
+   ORDER BY b.board_date,l.prop_id
+ `).bind(window.promoted_model_version_id,window.started_at).all<Record<string,unknown>>()).results??[];
+ const graded=rows.filter(r=>['OVER','UNDER'].includes(String(r.result??'').toUpperCase()));
+ const performance=guardrailPerformance(graded);
+ const dates=[...new Set(graded.map(r=>String(r.board_date??'').slice(0,10)).filter(Boolean))].sort();
+ const failures=(await env.DB.prepare(`SELECT f.*,pi.canonical_name pitcher_name FROM post_promotion_guardrail_failures f LEFT JOIN props p ON p.prop_id=f.prop_id LEFT JOIN pitchers pi ON pi.pitcher_id=p.pitcher_id WHERE f.manual_model_promotion_id=? ORDER BY f.failed_at DESC LIMIT 100`).bind(window.manual_model_promotion_id).all<Record<string,unknown>>()).results??[];
+ const missingLedger=Number((await env.DB.prepare(`
+   SELECT COUNT(*) n FROM recommendations r
+   WHERE r.model_version_id=? AND r.generated_at>=?
+     AND NOT EXISTS (
+       SELECT 1 FROM model_predictions mp WHERE mp.prop_id=r.prop_id AND mp.model_version_id=?
+         AND mp.prediction_mode='PRODUCTION' AND mp.prediction_status='COMPLETE' AND mp.predicted_at>=?
+     )
+ `).bind(window.promoted_model_version_id,window.started_at,window.promoted_model_version_id,window.started_at).first<{n:number}>())?.n??0);
+ let frozenCandidate:any=null;
+ try{
+  const evidence=freeze?.evidence_json?JSON.parse(freeze.evidence_json):null;
+  frozenCandidate=evidence?.certification_summary?.v14??evidence?.live?.v14??null;
+ }catch{frozenCandidate=null;}
+ const baselineHit=frozenCandidate?.hit_rate==null?0.50:Number(frozenCandidate.hit_rate);
+ const baselineBrier=frozenCandidate?.brier==null?0.256:Number(frozenCandidate.brier);
+ const baselineCal=Math.abs(frozenCandidate?.calibration_gap==null?0.037:Number(frozenCandidate.calibration_gap));
+ const hitFloor=Math.max(0,baselineHit-Number(window.max_hit_rate_drop));
+ const brierCeiling=Math.min(1,baselineBrier+Number(window.max_brier_increase));
+ const calibrationCeiling=Math.max(Number(window.max_abs_calibration_gap),baselineCal+0.05);
+ const absCal=performance.calibration_gap==null?null:Math.abs(performance.calibration_gap);
+ const healthSample=graded.length>=window.min_health_graded_pairs&&dates.length>=window.min_health_distinct_dates;
+ const fullSample=graded.length>=window.min_full_graded_pairs&&dates.length>=window.min_full_distinct_dates;
+ const hitFail=performance.hit_rate!=null&&performance.hit_rate<hitFloor;
+ const brierFail=performance.brier!=null&&performance.brier>brierCeiling;
+ const calFail=absCal!=null&&absCal>calibrationCeiling;
+ const performanceFailCount=[hitFail,brierFail,calFail].filter(Boolean).length;
+ let status='COLLECTING';
+ if(failures.length>=3||missingLedger>=3||(fullSample&&performanceFailCount>=2))status='ROLLBACK_RECOMMENDED';
+ else if(failures.length>0||missingLedger>0||(healthSample&&performanceFailCount>0))status='WATCH';
+ else if(healthSample)status='HEALTHY';
+ const daily=dates.map(date=>{const rr=graded.filter(r=>String(r.board_date??'').slice(0,10)===date);return {date,...guardrailPerformance(rr),graded_pairs:rr.length};});
+ return {status,window,production,rollback,summary:{production_predictions:rows.length,graded_pairs:graded.length,distinct_dates:dates.length,health_sample_ready:healthSample,full_sample_ready:fullSample,min_health_graded_pairs:window.min_health_graded_pairs,min_health_distinct_dates:window.min_health_distinct_dates,min_full_graded_pairs:window.min_full_graded_pairs,min_full_distinct_dates:window.min_full_distinct_dates,runtime_or_ledger_failures:failures.length,missing_production_ledgers:missingLedger,performance,abs_calibration_gap:absCal,frozen_baseline:{hit_rate:baselineHit,brier:baselineBrier,abs_calibration_gap:baselineCal},thresholds:{hit_rate_floor:hitFloor,brier_ceiling:brierCeiling,abs_calibration_gap_ceiling:calibrationCeiling},checks:{hit_rate:hitFail?'FAIL':performance.hit_rate==null?'WAITING':'PASS',brier:brierFail?'FAIL':performance.brier==null?'WAITING':'PASS',calibration:calFail?'FAIL':absCal==null?'WAITING':'PASS',runtime_failures:failures.length===0?'PASS':'FAIL',ledger_integrity:missingLedger===0?'PASS':'FAIL'}},daily,failures,automatic_rollback:false,rollback_available:Boolean(rollback)};
+}
+
 async function getPromotionReadiness(env:Env):Promise<Response>{
   const first=await collectPromotionReadinessV92(env);
   // Build 9.3.1 reconciliation is idempotent (checkpoint keys are UNIQUE).
@@ -11628,7 +11742,9 @@ async function getPromotionReadiness(env:Env):Promise<Response>{
   const final_readiness=await getTechnicalReadinessFreeze(env,certification?.session?.live_shadow_certification_id??null);
   const manual_promotion=await getManualPromotion(env,final_readiness?.technical_readiness_freeze_id??null);
   const current_production=await env.DB.prepare(`SELECT model_version_id,version_name,model_role,lifecycle_status,execution_enabled FROM model_versions WHERE model_role='PRODUCTION' AND lifecycle_status='ACTIVE' ORDER BY model_version_id DESC LIMIT 1`).first<Record<string,unknown>>();
-  return json({release:'3.8',build:'9.5',governance_version:'promotion-gate-v1',...readiness,current_production,certification,monitoring,final_readiness,manual_promotion,promotion_enabled:Boolean(final_readiness?.decision_status==='TECHNICALLY_READY'&&!manual_promotion),note:manual_promotion?'Build 9.5 manual promotion is complete. v14 is production; the frozen v13 model is retained as the rollback target.':'Build 9.5 exposes a guarded manual promotion control only after an immutable TECHNICALLY_READY freeze. No automatic promotion occurs.'});
+  const guardrail=await collectPostPromotionGuardrail(env,manual_promotion,final_readiness);
+  const display_candidate=manual_promotion?null:readiness.candidate;
+  return json({release:'3.8',build:'9.6',governance_version:'promotion-gate-v1',...readiness,current_production,display_candidate,certification,monitoring,final_readiness,manual_promotion,guardrail,promotion_enabled:false,note:manual_promotion?'Build 9.6 post-promotion guardrail is active. v14 is production; v13 remains the rollback target. No automatic rollback exists.':'Build 9.6 is waiting for a completed manual promotion before the post-promotion guardrail can start.'});
 }
 
 async function capturePromotionReadiness(env:Env,identity:AccessIdentity):Promise<Response>{
