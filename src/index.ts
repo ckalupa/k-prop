@@ -2989,7 +2989,18 @@ async function syncTeamStrikeoutSplits(
                 plate_appearances=excluded.plate_appearances,strikeouts=excluded.strikeouts,walks=excluded.walks,
                 strikeout_rate=excluded.strikeout_rate,walk_rate=excluded.walk_rate,source_name=excluded.source_name,
                 sync_run_id=excluded.sync_run_id,last_synced_at=CURRENT_TIMESTAMP
-            `).bind(
+
+          /* KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_NOOP_UPSERT_TEAM_STRIKEOUT_SPLITS_DAILY */
+          WHERE mlb_team_id IS NOT excluded.mlb_team_id
+            OR season IS NOT excluded.season
+            OR start_date IS NOT excluded.start_date
+            OR end_date IS NOT excluded.end_date
+            OR plate_appearances IS NOT excluded.plate_appearances
+            OR strikeouts IS NOT excluded.strikeouts
+            OR walks IS NOT excluded.walks
+            OR strikeout_rate IS NOT excluded.strikeout_rate
+            OR walk_rate IS NOT excluded.walk_rate
+            OR source_name IS NOT excluded.source_name`).bind(
               team.team_id, team.mlb_team_id, safeDate, season, hand, row.days, row.start, safeDate,
               row.split.plateAppearances, row.split.strikeouts, row.split.walks, row.split.strikeoutRate, row.split.walkRate,
               row.source, syncRunId,
@@ -3099,6 +3110,20 @@ function featureRound(value: number | null, digits = 6): number | null {
   return Math.round(value * factor) / factor;
 }
 
+// KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY
+async function kpropCronSyncMayStart(env: Env, datasetName: string, recentMinutes = 10): Promise<boolean> {
+  const active = await env.DB.prepare(`
+    SELECT sync_run_id
+    FROM sync_runs
+    WHERE dataset_name=?
+      AND status='RUNNING'
+      AND started_at >= datetime('now',?)
+    ORDER BY sync_run_id DESC
+    LIMIT 1
+  `).bind(datasetName,`-${Math.max(1,recentMinutes)} minutes`).first<{sync_run_id:number}>();
+  return !active;
+}
+
 async function syncPitcherDailyFeatures(
   env: Env,
   asOfDate: string,
@@ -3198,7 +3223,51 @@ async function syncPitcherDailyFeatures(
             pitch_count_trend_3v3=excluded.pitch_count_trend_3v3,innings_trend_3v3=excluded.innings_trend_3v3,strikeout_trend_3v3=excluded.strikeout_trend_3v3,
             recent5_vs_season_k_per_bf=excluded.recent5_vs_season_k_per_bf,data_quality_score=excluded.data_quality_score,data_quality_flags_json=excluded.data_quality_flags_json,
             sync_run_id=excluded.sync_run_id,generated_at=CURRENT_TIMESTAMP
-        `).bind(
+
+          /* KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_NOOP_UPSERT_PITCHER_DAILY_FEATURES */
+          WHERE pitcher_id IS NOT excluded.pitcher_id
+            OR pitcher_name IS NOT excluded.pitcher_name
+            OR season IS NOT excluded.season
+            OR source_cutoff_date IS NOT excluded.source_cutoff_date
+            OR season_starts IS NOT excluded.season_starts
+            OR last3_starts IS NOT excluded.last3_starts
+            OR last5_starts IS NOT excluded.last5_starts
+            OR last10_starts IS NOT excluded.last10_starts
+            OR season_strikeouts IS NOT excluded.season_strikeouts
+            OR season_batters_faced IS NOT excluded.season_batters_faced
+            OR season_outs_recorded IS NOT excluded.season_outs_recorded
+            OR season_pitch_count IS NOT excluded.season_pitch_count
+            OR season_k_per_bf IS NOT excluded.season_k_per_bf
+            OR season_k_per_inning IS NOT excluded.season_k_per_inning
+            OR season_avg_strikeouts IS NOT excluded.season_avg_strikeouts
+            OR season_avg_batters_faced IS NOT excluded.season_avg_batters_faced
+            OR season_avg_innings IS NOT excluded.season_avg_innings
+            OR season_avg_pitch_count IS NOT excluded.season_avg_pitch_count
+            OR last3_k_per_bf IS NOT excluded.last3_k_per_bf
+            OR last3_avg_strikeouts IS NOT excluded.last3_avg_strikeouts
+            OR last3_avg_batters_faced IS NOT excluded.last3_avg_batters_faced
+            OR last3_avg_innings IS NOT excluded.last3_avg_innings
+            OR last3_avg_pitch_count IS NOT excluded.last3_avg_pitch_count
+            OR last5_k_per_bf IS NOT excluded.last5_k_per_bf
+            OR last5_avg_strikeouts IS NOT excluded.last5_avg_strikeouts
+            OR last5_avg_batters_faced IS NOT excluded.last5_avg_batters_faced
+            OR last5_avg_innings IS NOT excluded.last5_avg_innings
+            OR last5_avg_pitch_count IS NOT excluded.last5_avg_pitch_count
+            OR last10_k_per_bf IS NOT excluded.last10_k_per_bf
+            OR last10_avg_strikeouts IS NOT excluded.last10_avg_strikeouts
+            OR last10_avg_batters_faced IS NOT excluded.last10_avg_batters_faced
+            OR last10_avg_innings IS NOT excluded.last10_avg_innings
+            OR last10_avg_pitch_count IS NOT excluded.last10_avg_pitch_count
+            OR home_k_per_bf IS NOT excluded.home_k_per_bf
+            OR away_k_per_bf IS NOT excluded.away_k_per_bf
+            OR days_since_last_start IS NOT excluded.days_since_last_start
+            OR last_start_date IS NOT excluded.last_start_date
+            OR pitch_count_trend_3v3 IS NOT excluded.pitch_count_trend_3v3
+            OR innings_trend_3v3 IS NOT excluded.innings_trend_3v3
+            OR strikeout_trend_3v3 IS NOT excluded.strikeout_trend_3v3
+            OR recent5_vs_season_k_per_bf IS NOT excluded.recent5_vs_season_k_per_bf
+            OR data_quality_score IS NOT excluded.data_quality_score
+            OR data_quality_flags_json IS NOT excluded.data_quality_flags_json`).bind(
           pitcher.pitcher_id ?? null,mlbPitcherId,String(pitcher.pitcher_name ?? `MLB ${mlbPitcherId}`),safeDate,season,lastStartDate,
           ss.count,s3.count,s5.count,s10.count,ss.k,ss.bf,ss.outs,ss.pitches,
           featureRound(ss.kbf),featureRound(ss.kpi),featureRound(ss.avgK),featureRound(ss.avgBf),featureRound(ss.avgIp),featureRound(ss.avgPitches),
@@ -3253,6 +3322,8 @@ async function runPitcherDailyFeatureSync(request:Request,env:Env):Promise<Respo
 async function autoSyncPitcherDailyFeatures(env:Env,scheduledTime:number):Promise<void>{
   const local=chicagoDateParts(scheduledTime);
   if (local.minute!==25) return;
+  // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_PITCHER_DAILY_FEATURES
+  if(!await kpropCronSyncMayStart(env,"PITCHER_DAILY_FEATURES",10)) return;
   await syncPitcherDailyFeatures(env,chicagoDateString(scheduledTime),'CRON');
 }
 
@@ -3390,7 +3461,33 @@ async function syncTeamDailyFeatures(
             trend_direction=excluded.trend_direction,stability_status=excluded.stability_status,sample_size_score=excluded.sample_size_score,
             data_quality_score=excluded.data_quality_score,data_quality_flags_json=excluded.data_quality_flags_json,
             source_sync_run_ids_json=excluded.source_sync_run_ids_json,sync_run_id=excluded.sync_run_id,generated_at=CURRENT_TIMESTAMP
-        `).bind(
+
+          /* KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_NOOP_UPSERT_TEAM_DAILY_FEATURES */
+          WHERE mlb_team_id IS NOT excluded.mlb_team_id
+            OR team_abbr IS NOT excluded.team_abbr
+            OR season IS NOT excluded.season
+            OR source_cutoff_date IS NOT excluded.source_cutoff_date
+            OR season_plate_appearances IS NOT excluded.season_plate_appearances
+            OR season_strikeouts IS NOT excluded.season_strikeouts
+            OR season_k_rate IS NOT excluded.season_k_rate
+            OR last30_plate_appearances IS NOT excluded.last30_plate_appearances
+            OR last30_strikeouts IS NOT excluded.last30_strikeouts
+            OR last30_k_rate IS NOT excluded.last30_k_rate
+            OR last14_plate_appearances IS NOT excluded.last14_plate_appearances
+            OR last14_strikeouts IS NOT excluded.last14_strikeouts
+            OR last14_k_rate IS NOT excluded.last14_k_rate
+            OR last7_plate_appearances IS NOT excluded.last7_plate_appearances
+            OR last7_strikeouts IS NOT excluded.last7_strikeouts
+            OR last7_k_rate IS NOT excluded.last7_k_rate
+            OR weighted_recent_k_rate IS NOT excluded.weighted_recent_k_rate
+            OR recent_vs_season_delta IS NOT excluded.recent_vs_season_delta
+            OR last7_vs_last30_delta IS NOT excluded.last7_vs_last30_delta
+            OR trend_direction IS NOT excluded.trend_direction
+            OR stability_status IS NOT excluded.stability_status
+            OR sample_size_score IS NOT excluded.sample_size_score
+            OR data_quality_score IS NOT excluded.data_quality_score
+            OR data_quality_flags_json IS NOT excluded.data_quality_flags_json
+            OR source_sync_run_ids_json IS NOT excluded.source_sync_run_ids_json`).bind(
           first.team_id,first.mlb_team_id,first.team_abbr,safeDate,season,first.pitcher_hand,sourceDate,
           seasonRow.plate_appearances,seasonRow.strikeouts,seasonRow.strikeout_rate,
           d30.plate_appearances,d30.strikeouts,d30.strikeout_rate,
@@ -3471,6 +3568,8 @@ async function runTeamDailyFeatureSync(request: Request, env: Env): Promise<Resp
 async function autoSyncTeamDailyFeatures(env: Env, scheduledTime: number): Promise<void> {
   const local = chicagoDateParts(scheduledTime);
   if (local.minute !== 35) return;
+  // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_TEAM_DAILY_FEATURES
+  if(!await kpropCronSyncMayStart(env,"TEAM_DAILY_FEATURES",10)) return;
   await syncTeamDailyFeatures(env,chicagoDateString(scheduledTime),'CRON');
 }
 
@@ -4286,6 +4385,8 @@ async function runTeamSplitSync(request: Request, env: Env): Promise<Response> {
 async function autoSyncTeamStrikeoutSplits(env: Env, scheduledTime: number): Promise<void> {
   const local=chicagoDateParts(scheduledTime);
   if (local.minute % 10 !== 0) return;
+  // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_TEAM_STRIKEOUT_SPLITS
+  if(!await kpropCronSyncMayStart(env,"TEAM_STRIKEOUT_SPLITS",10)) return;
   const status=await env.DB.prepare(`SELECT metadata_json FROM data_source_status WHERE dataset_name='TEAM_STRIKEOUT_SPLITS'`).first<{metadata_json:string|null}>();
   let offset=0;
   try { offset=Number(JSON.parse(status?.metadata_json||'{}').next_offset||0); } catch {}
@@ -6635,7 +6736,30 @@ async function syncMlbScheduleGames(
             last_synced_at = CURRENT_TIMESTAMP,
             source_updated_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
-        `).bind(
+
+          /* KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_NOOP_UPSERT_GAMES */
+          WHERE game_date IS NOT excluded.game_date
+            OR official_date IS NOT excluded.official_date
+            OR away_team_id IS NOT excluded.away_team_id
+            OR home_team_id IS NOT excluded.home_team_id
+            OR scheduled_start IS NOT excluded.scheduled_start
+            OR game_status IS NOT excluded.game_status
+            OR status_abstract IS NOT excluded.status_abstract
+            OR status_detailed IS NOT excluded.status_detailed
+            OR status_code IS NOT excluded.status_code
+            OR venue_name IS NOT excluded.venue_name
+            OR day_night IS NOT excluded.day_night
+            OR doubleheader IS NOT excluded.doubleheader
+            OR game_number IS NOT excluded.game_number
+            OR away_score IS NOT excluded.away_score
+            OR home_score IS NOT excluded.home_score
+            OR away_probable_pitcher_mlb_id IS NOT excluded.away_probable_pitcher_mlb_id
+            OR away_probable_pitcher_name IS NOT excluded.away_probable_pitcher_name
+            OR away_probable_pitcher_hand IS NOT excluded.away_probable_pitcher_hand
+            OR home_probable_pitcher_mlb_id IS NOT excluded.home_probable_pitcher_mlb_id
+            OR home_probable_pitcher_name IS NOT excluded.home_probable_pitcher_name
+            OR home_probable_pitcher_hand IS NOT excluded.home_probable_pitcher_hand
+            OR source_name IS NOT excluded.source_name`).bind(
           gamePk, officialDate, officialDate, awayTeamId, homeTeamId,
           scheduledStart, detailedStatus ?? abstractStatus, abstractStatus, detailedStatus,
           codedStatus, game.venue?.name ?? null, game.dayNight ?? null,
@@ -6762,6 +6886,8 @@ async function runScheduleSync(request: Request, env: Env): Promise<Response> {
 async function autoSyncMlbSchedule(env: Env, scheduledTime: number): Promise<void> {
   const local = chicagoDateParts(scheduledTime);
   if (local.minute % 30 !== 0) return;
+  // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_MLB_SCHEDULE_GAMES
+  if(!await kpropCronSyncMayStart(env,"MLB_SCHEDULE_GAMES",10)) return;
   const today = chicagoDateString(scheduledTime);
   await syncMlbScheduleGames(env, isoDateOffset(today, -1), isoDateOffset(today, 2), "CRON");
 }
@@ -6925,7 +7051,29 @@ async function syncMlbPitcherGameLogs(
                 home_runs_allowed=excluded.home_runs_allowed, strikes=excluded.strikes, balls=excluded.balls,
                 game_status=excluded.game_status, source_updated_at=CURRENT_TIMESTAMP,
                 last_synced_at=CURRENT_TIMESTAMP, sync_run_id=excluded.sync_run_id
-            `).bind(
+
+          /* KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_NOOP_UPSERT_RAW_PITCHER_GAME_LOGS */
+          WHERE pitcher_name IS NOT excluded.pitcher_name
+            OR pitcher_id IS NOT excluded.pitcher_id
+            OR game_id IS NOT excluded.game_id
+            OR team_abbreviation IS NOT excluded.team_abbreviation
+            OR opponent_abbreviation IS NOT excluded.opponent_abbreviation
+            OR home_away IS NOT excluded.home_away
+            OR starter IS NOT excluded.starter
+            OR decision_code IS NOT excluded.decision_code
+            OR innings_pitched_text IS NOT excluded.innings_pitched_text
+            OR outs_recorded IS NOT excluded.outs_recorded
+            OR strikeouts IS NOT excluded.strikeouts
+            OR batters_faced IS NOT excluded.batters_faced
+            OR pitch_count IS NOT excluded.pitch_count
+            OR walks IS NOT excluded.walks
+            OR hits_allowed IS NOT excluded.hits_allowed
+            OR runs_allowed IS NOT excluded.runs_allowed
+            OR earned_runs IS NOT excluded.earned_runs
+            OR home_runs_allowed IS NOT excluded.home_runs_allowed
+            OR strikes IS NOT excluded.strikes
+            OR balls IS NOT excluded.balls
+            OR game_status IS NOT excluded.game_status`).bind(
               gamePk, mlbPitcherId, fullName, localPitcherId, Number(game.game_id), String(game.official_date),
               teamAbbr, opponentAbbr, side.toUpperCase(), values.starter, pitching.note ?? null,
               innings, inningsToOuts(innings), values.strikeouts, values.batters, values.pitches,
@@ -7005,6 +7153,8 @@ async function runPitcherLogSync(request: Request, env: Env): Promise<Response> 
 async function autoSyncMlbPitcherLogs(env: Env, scheduledTime: number): Promise<void> {
   const local=chicagoDateParts(scheduledTime);
   if (local.minute!==10) return;
+  // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_PITCHER_GAME_LOGS
+  if(!await kpropCronSyncMayStart(env,"PITCHER_GAME_LOGS",10)) return;
   const today=chicagoDateString(scheduledTime);
   await syncMlbPitcherGameLogs(env,isoDateOffset(today,-2),today,"CRON");
 }
