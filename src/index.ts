@@ -1294,7 +1294,8 @@ const board = await env.DB.prepare(`
 async function createBoard(request: Request, env: Env, identity: AccessIdentity): Promise<Response> {
   const input = await parseJson<BoardInput>(request);
   const boardDate = validateDate(input.board_date);
-  const boardName = String(input.board_name ?? `PrizePicks ${boardDate}`).trim().slice(0, 120);
+  // Build 9.6.2: board names are deterministic; date entry is the only source of truth.
+  const boardName = `PrizePicks ${boardDate}`;
 
   const existing = await env.DB.prepare(`
     SELECT board_id, status
@@ -1337,9 +1338,8 @@ async function updateBoard(
   const boardDate = input.board_date === undefined
     ? String(board.board_date)
     : validateDate(input.board_date);
-  const boardName = input.board_name === undefined
-    ? String(board.board_name ?? "")
-    : String(input.board_name).trim().slice(0, 120);
+  // Build 9.6.2: never require or trust a manually typed board title.
+  const boardName = `PrizePicks ${boardDate}`;
 
   await env.DB.prepare(`
     UPDATE boards
@@ -7638,9 +7638,20 @@ async function gradeBoardResults(
   let voids = 0;
   const warnings: GradeWarning[] = [...refreshWarnings];
 
+  const scheduledBatchPropIds = refreshLimit == null
+    ? null
+    : new Set(refreshCandidates.map((prop) => Number(prop.prop_id)));
+
   for (const prop of props.results) {
     // Preserve already-settled outcomes. Scheduled retries should only act on pending props.
     if (prop.result_status === "GRADED") continue;
+
+    // Build 9.6.2: the cron path must be truly bounded. Earlier builds limited
+    // the game-log refresh batch but then continued across every pending prop,
+    // which could still trigger many game-feed fallbacks and terminate the Worker
+    // before the automation run could be finalized. Manual grading (null limit)
+    // continues to consider the whole board.
+    if (scheduledBatchPropIds && !scheduledBatchPropIds.has(Number(prop.prop_id))) continue;
 
     let game = await env.DB.prepare(`
       SELECT strikeouts, innings_pitched, pitch_count, batters_faced,
@@ -7960,11 +7971,29 @@ async function autoRefreshPregameBoards(env: Env, scheduledTime: number): Promis
 async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<void> {
   const local = chicagoDateParts(scheduledTime);
 
-  // UTC cron entries cover daylight and standard time for the
-  // 6:00, 7:00, and 8:00 AM America/Chicago grading attempts.
-  if (![6, 7, 8].includes(local.hour) || local.minute >= 5) return;
+  // Build 9.6.2: run a small, resumable grading batch every ten minutes from
+  // 6:00 through 10:50 AM America/Chicago. Once the previous board closes,
+  // later cron ticks become cheap no-ops because there is no ACTIVE/ARCHIVED
+  // board left for that date.
+  if (local.hour < 6 || local.hour > 10 || local.minute % 10 !== 0) return;
 
   const boardDate = previousChicagoDate(scheduledTime);
+
+  // Reap orphaned grading runs globally, including rows left behind on a board
+  // that was later closed manually. A runtime termination cannot execute catch.
+  await env.DB.prepare(`
+    UPDATE automation_runs
+    SET completed_at = CURRENT_TIMESTAMP,
+        status = 'FAILED',
+        details = json_object(
+          'error', 'STALE_RUNNING_REAPED',
+          'message', 'Previous MORNING_GRADE invocation did not finalize and was marked stale by a later cron retry.'
+        )
+    WHERE run_type = 'MORNING_GRADE'
+      AND status = 'RUNNING'
+      AND datetime(started_at) <= datetime('now', '-8 minutes')
+  `).run();
+
   const board = await env.DB.prepare(`
     SELECT board_id, board_date, board_name, status
     FROM boards
@@ -7992,6 +8021,21 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
     issuer: "scheduled",
   };
 
+  const activeRun = await env.DB.prepare(`
+    SELECT automation_run_id, started_at
+    FROM automation_runs
+    WHERE board_id = ?
+      AND run_type = 'MORNING_GRADE'
+      AND status = 'RUNNING'
+    ORDER BY automation_run_id DESC
+    LIMIT 1
+  `).bind(board.board_id).first<{ automation_run_id: number; started_at: string }>();
+
+  if (activeRun) {
+    console.log(`AUTO_GRADE: board ${board.board_id} already has RUNNING automation ${activeRun.automation_run_id}; skipping overlap.`);
+    return;
+  }
+
   const runInsert = await env.DB.prepare(`
     INSERT INTO automation_runs (board_id, run_type, trigger_source, status)
     VALUES (?, 'MORNING_GRADE', 'CRON', 'RUNNING')
@@ -7999,53 +8043,54 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
   const runId = Number(runInsert.meta.last_row_id);
 
   try {
-    // Refresh up to twenty pending pitchers per scheduled run. This covers a normal
-    // full MLB board while retaining a guard against excessive subrequests.
-    const response = await gradeBoardResults(env, systemIdentity, board.board_id, 20);
+    // Six pending pitchers per run keeps outbound MLB calls bounded. The next
+    // ten-minute cron tick resumes automatically until pending reaches zero.
+    const response = await gradeBoardResults(env, systemIdentity, board.board_id, 6);
     const payload = await response.json<Record<string, unknown>>();
 
     let createdBoardId: number | null = null;
-  const closedBoard = await env.DB.prepare(`
-    SELECT board_id
-    FROM boards
-    WHERE board_id = ? AND status = 'CLOSED'
-    LIMIT 1
-  `).bind(board.board_id).first<{ board_id: number }>();
-
-  if (closedBoard && Number(payload.pending ?? -1) === 0) {
-    const today = chicagoDateString(scheduledTime);
-    const existingToday = await env.DB.prepare(`
-      SELECT board_id, status
+    const closedBoard = await env.DB.prepare(`
+      SELECT board_id
       FROM boards
-      WHERE board_date = ?
-      ORDER BY board_id DESC
+      WHERE board_id = ? AND status = 'CLOSED'
       LIMIT 1
-    `).bind(today).first<{ board_id: number; status: string }>();
+    `).bind(board.board_id).first<{ board_id: number }>();
 
-    if (!existingToday) {
-      const result = await env.DB.prepare(`
-        INSERT INTO boards (
-          board_date,
-          board_name,
-          status,
-          source,
-          created_at,
-          updated_at
-        )
-        VALUES (?, ?, 'DRAFT', 'AUTO_CRON', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `).bind(today, `PrizePicks ${today}`).run();
+    if (closedBoard && Number(payload.pending ?? -1) === 0) {
+      const today = chicagoDateString(scheduledTime);
+      const existingToday = await env.DB.prepare(`
+        SELECT board_id, status
+        FROM boards
+        WHERE board_date = ?
+        ORDER BY board_id DESC
+        LIMIT 1
+      `).bind(today).first<{ board_id: number; status: string }>();
 
-      createdBoardId = Number(result.meta.last_row_id);
+      if (!existingToday) {
+        const boardName = `PrizePicks ${today}`;
+        const result = await env.DB.prepare(`
+          INSERT INTO boards (
+            board_date,
+            board_name,
+            status,
+            source,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, 'DRAFT', 'AUTO_CRON', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `).bind(today, boardName).run();
 
-      await audit(env, systemIdentity, "BOARD_AUTO_CREATED", "BOARD", createdBoardId, {
-        board_date: today,
-        board_name: `PrizePicks ${today}`,
-        status: "DRAFT",
-        source: "AUTO_CRON",
-        previous_board_id: board.board_id,
-      });
+        createdBoardId = Number(result.meta.last_row_id);
+
+        await audit(env, systemIdentity, "BOARD_AUTO_CREATED", "BOARD", createdBoardId, {
+          board_date: today,
+          board_name: boardName,
+          status: "DRAFT",
+          source: "AUTO_CRON",
+          previous_board_id: board.board_id,
+        });
+      }
     }
-  }
 
     const gradeDetails = {
       board_id: board.board_id,
@@ -8059,6 +8104,7 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
       pitchers_refreshed: payload.pitchers_refreshed,
       created_board_id: createdBoardId,
       warnings: payload.warnings,
+      retry_mode: "BOUNDED_RESUMABLE",
     };
 
     await env.DB.prepare(`
@@ -8086,7 +8132,6 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
     throw error;
   }
 }
-
 
 async function activateBoard(
   env: Env,

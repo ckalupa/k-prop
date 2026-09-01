@@ -13,6 +13,12 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 
+function syncAutomaticBoardName() {
+  const date = $("#board-date")?.value || "";
+  const field = $("#board-name");
+  if (field) field.value = date ? `PrizePicks ${date}` : "";
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -250,6 +256,7 @@ function pregameStatus(row) {
 function renderBoard() {
   $("#board-date").value = state.board?.board_date || "";
   $("#board-name").value = state.board?.board_name || "";
+  syncAutomaticBoardName();
   $("#board-select").value = state.board?.board_id ? String(state.board.board_id) : "";
   syncButtons();
   renderAutomationStatus();
@@ -723,13 +730,15 @@ $("#board-select").addEventListener("change", async (event) => {
   }
 });
 
+$("#board-date").addEventListener("change", syncAutomaticBoardName);
+$("#board-date").addEventListener("input", syncAutomaticBoardName);
+
 $("#create-board").addEventListener("click", async () => {
   try {
     const data = await api("/api/boards", {
       method: "POST",
       body: JSON.stringify({
         board_date: $("#board-date").value,
-        board_name: $("#board-name").value,
       }),
     });
     await loadBootstrap();
@@ -746,7 +755,6 @@ $("#save-board").addEventListener("click", async () => {
       method: "PATCH",
       body: JSON.stringify({
         board_date: $("#board-date").value,
-        board_name: $("#board-name").value,
       }),
     });
     await loadBootstrap();

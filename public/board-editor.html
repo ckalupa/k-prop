@@ -33,7 +33,8 @@
           <input id="board-date" type="date">
         </label>
         <label>Board name
-          <input id="board-name" type="text" maxlength="120" placeholder="PrizePicks 2026-07-21">
+          <input id="board-name" type="text" maxlength="120" placeholder="PrizePicks YYYY-MM-DD" readonly aria-readonly="true">
+          <span class="muted">Auto-generated from board date.</span>
         </label>
         <button id="create-board" type="button">Create Draft</button>
         <button id="save-board" type="button" disabled>Save Board</button>
