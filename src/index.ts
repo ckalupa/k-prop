@@ -1895,6 +1895,7 @@ interface RefreshPitcherResult {
   id_resolved: boolean;
   games_loaded: number;
   warning?: string;
+  warning_stage?: "REFRESH" | "INSUFFICIENT_SAMPLE";
 }
 
 function normalizePlayerName(value: unknown): string {
@@ -2233,7 +2234,8 @@ async function refreshBoardPitcherData(
         mlb_id: mlbId,
         id_resolved: idResolved,
         games_loaded: gamesLoaded,
-        warning: gamesLoaded ? undefined : `No ${season} pitching game-log rows were returned.`,
+        warning: gamesLoaded ? undefined : `No ${season} pitching history is available for this pitcher.`,
+        warning_stage: gamesLoaded ? undefined : "INSUFFICIENT_SAMPLE",
       });
     } catch (error) {
       results.push({
@@ -3111,16 +3113,35 @@ function featureRound(value: number | null, digits = 6): number | null {
 }
 
 // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY
+// KPROP_BUILD_9_5_3_SYNC_RUN_READ_EFFICIENCY_AND_STALE_HYGIENE
 async function kpropCronSyncMayStart(env: Env, datasetName: string, recentMinutes = 10): Promise<boolean> {
+  const activeMinutes = Math.max(1, recentMinutes);
+  const staleMinutes = Math.max(15, activeMinutes);
+  await env.DB.prepare(`
+    UPDATE sync_runs
+    SET status='FAILED',
+        completed_at=CURRENT_TIMESTAMP,
+        rows_rejected=CASE WHEN rows_rejected < 1 THEN 1 ELSE rows_rejected END,
+        details_json=json_object(
+          'error','STALE_CRON_RUNNING_REAPED',
+          'message','Stale production sync RUNNING row recovered by Build 9.5.3',
+          'dataset_name',dataset_name
+        )
+    WHERE dataset_name=?
+      AND trigger_source='CRON'
+      AND status='RUNNING'
+      AND started_at < datetime('now',?)
+  `).bind(datasetName,`-${staleMinutes} minutes`).run();
+
   const active = await env.DB.prepare(`
     SELECT sync_run_id
     FROM sync_runs
     WHERE dataset_name=?
       AND status='RUNNING'
       AND started_at >= datetime('now',?)
-    ORDER BY sync_run_id DESC
+    ORDER BY started_at DESC, sync_run_id DESC
     LIMIT 1
-  `).bind(datasetName,`-${Math.max(1,recentMinutes)} minutes`).first<{sync_run_id:number}>();
+  `).bind(datasetName,`-${activeMinutes} minutes`).first<{sync_run_id:number}>();
   return !active;
 }
 
@@ -6330,7 +6351,7 @@ async function refreshPitcherBatch(
       pitcher_id: row.pitcher_id,
       pitcher: row.pitcher,
       message: row.warning,
-      stage: "REFRESH",
+      stage: row.warning_stage ?? "REFRESH",
     }));
 
   await audit(env, identity, "BOARD_PITCHER_BATCH_REFRESHED", "BOARD", boardId, {
@@ -6446,7 +6467,7 @@ async function refreshAndProcessBoard(
       pitcher_id: row.pitcher_id,
       pitcher: row.pitcher,
       message: row.warning,
-      stage: "REFRESH",
+      stage: row.warning_stage ?? "REFRESH",
     }));
   const matchupWarnings = matchupResults
     .filter((row) => row.warning)
@@ -7185,15 +7206,7 @@ async function autoSyncMlbPitcherLogs(env: Env, scheduledTime: number): Promise<
   const local=chicagoDateParts(scheduledTime);
   // KPROP_BUILD_9_5_2_PITCHER_GAME_LOGS_BOUNDED_RESUME
   if (local.minute % 10 !== 0) return;
-  await env.DB.prepare(`
-    UPDATE sync_runs
-    SET status='FAILED', completed_at=CURRENT_TIMESTAMP, rows_rejected=rows_rejected+1,
-        details_json='{"error":"stale PITCHER_GAME_LOGS RUNNING run recovered by Build 9.5.2"}'
-    WHERE dataset_name='PITCHER_GAME_LOGS'
-      AND trigger_source='CRON'
-      AND status='RUNNING'
-      AND started_at < datetime('now','-15 minutes')
-  `).run();
+  // Build 9.5.3 centralizes stale CRON recovery in kpropCronSyncMayStart.
   if(!await kpropCronSyncMayStart(env,"PITCHER_GAME_LOGS",15)) return;
   const today=chicagoDateString(scheduledTime);
   const start=isoDateOffset(today,-2);
