@@ -6963,33 +6963,60 @@ async function ensureGameLogPitcher(
   return Number(inserted.meta.last_row_id);
 }
 
+interface PitcherLogSyncOptions {
+  offset?: number;
+  limit?: number;
+}
+
 async function syncMlbPitcherGameLogs(
   env: Env,
   startDate: string,
   endDate: string,
   triggerSource: "CRON" | "ADMIN" | "API" | "MANUAL" = "MANUAL",
+  options: PitcherLogSyncOptions = {},
 ): Promise<PitcherLogSyncResult> {
   const safeStart = validateDate(startDate);
   const safeEnd = validateDate(endDate);
   if (safeEnd < safeStart) throw new Response(JSON.stringify({ error: "end_date must be on or after start_date" }), { status: 400 });
+  const requestedOffset = Math.max(0, Math.trunc(Number(options.offset ?? 0)));
+  const requestedLimit = options.limit == null ? null : Math.max(1, Math.min(20, Math.trunc(Number(options.limit))));
+  const totalRow = await env.DB.prepare(`
+    SELECT COUNT(*) AS n
+    FROM games g
+    WHERE g.official_date BETWEEN ? AND ? AND g.mlb_game_pk IS NOT NULL
+  `).bind(safeStart, safeEnd).first<{n:number}>();
+  const totalGames = Math.max(0, Number(totalRow?.n ?? 0));
+  const effectiveOffset = totalGames > 0 ? requestedOffset % totalGames : 0;
   const runInsert = await env.DB.prepare(`
     INSERT INTO sync_runs (
       run_uuid, source_name, dataset_name, sync_mode, trigger_source,
-      status, source_cursor_start, source_cursor_end
-    ) VALUES (?, 'MLB_STATS_API', 'PITCHER_GAME_LOGS', 'INCREMENTAL', ?, 'RUNNING', ?, ?)
-  `).bind(crypto.randomUUID(), triggerSource, safeStart, safeEnd).run();
+      status, source_cursor_start, source_cursor_end, details_json
+    ) VALUES (?, 'MLB_STATS_API', 'PITCHER_GAME_LOGS', 'INCREMENTAL', ?, 'RUNNING', ?, ?, ?)
+  `).bind(crypto.randomUUID(), triggerSource, safeStart, safeEnd,
+    JSON.stringify({batch_offset:effectiveOffset,batch_limit:requestedLimit,total_games:totalGames})).run();
   const syncRunId = Number(runInsert.meta.last_row_id);
   let gamesRead=0, gamesFetched=0, logsInserted=0, logsUpdated=0, logsUnchanged=0, snapshotsInserted=0, rejected=0;
   try {
-    const games = await env.DB.prepare(`
-      SELECT g.game_id, g.mlb_game_pk, g.official_date, g.game_status,
-             at.abbreviation AS away_team, ht.abbreviation AS home_team
-      FROM games g
-      JOIN teams at ON at.team_id=g.away_team_id
-      JOIN teams ht ON ht.team_id=g.home_team_id
-      WHERE g.official_date BETWEEN ? AND ? AND g.mlb_game_pk IS NOT NULL
-      ORDER BY g.official_date, g.mlb_game_pk
-    `).bind(safeStart, safeEnd).all<Record<string, unknown>>();
+    const games = requestedLimit == null
+      ? await env.DB.prepare(`
+          SELECT g.game_id, g.mlb_game_pk, g.official_date, g.game_status,
+                 at.abbreviation AS away_team, ht.abbreviation AS home_team
+          FROM games g
+          JOIN teams at ON at.team_id=g.away_team_id
+          JOIN teams ht ON ht.team_id=g.home_team_id
+          WHERE g.official_date BETWEEN ? AND ? AND g.mlb_game_pk IS NOT NULL
+          ORDER BY g.official_date, g.mlb_game_pk
+        `).bind(safeStart, safeEnd).all<Record<string, unknown>>()
+      : await env.DB.prepare(`
+          SELECT g.game_id, g.mlb_game_pk, g.official_date, g.game_status,
+                 at.abbreviation AS away_team, ht.abbreviation AS home_team
+          FROM games g
+          JOIN teams at ON at.team_id=g.away_team_id
+          JOIN teams ht ON ht.team_id=g.home_team_id
+          WHERE g.official_date BETWEEN ? AND ? AND g.mlb_game_pk IS NOT NULL
+          ORDER BY g.official_date, g.mlb_game_pk
+          LIMIT ? OFFSET ?
+        `).bind(safeStart, safeEnd, requestedLimit, effectiveOffset).all<Record<string, unknown>>();
     gamesRead = games.results.length;
     for (const game of games.results) {
       const gamePk=Number(game.mlb_game_pk);
@@ -7100,11 +7127,15 @@ async function syncMlbPitcherGameLogs(
       }
     }
     const status: PitcherLogSyncResult["status"] = rejected===0 ? "SUCCEEDED" : rejected<gamesRead ? "PARTIAL" : "FAILED";
-    const sourceStatus=status==="SUCCEEDED" ? "HEALTHY" : status==="PARTIAL" ? "INCOMPLETE" : "FAILED";
+    const nextOffset = requestedLimit == null || totalGames === 0 ? 0 : effectiveOffset + gamesRead;
+    const done = requestedLimit == null || totalGames === 0 || nextOffset >= totalGames;
+    const sourceStatus=status==="FAILED" ? "FAILED" : done && status==="SUCCEEDED" ? "HEALTHY" : "INCOMPLETE";
+    const details={games_fetched:gamesFetched,snapshots_inserted:snapshotsInserted,batch_offset:effectiveOffset,
+      batch_limit:requestedLimit,total_games:totalGames,next_offset:done?0:nextOffset,done};
     await env.DB.prepare(`UPDATE sync_runs SET status=?, completed_at=CURRENT_TIMESTAMP, request_count=?,
       rows_read=?, rows_inserted=?, rows_updated=?, rows_unchanged=?, rows_rejected=?, freshness_cutoff_at=?, details_json=?
-      WHERE sync_run_id=?`).bind(status,gamesFetched,gamesRead,logsInserted,logsUpdated,logsUnchanged,rejected,safeEnd,
-      JSON.stringify({games_fetched:gamesFetched,snapshots_inserted:snapshotsInserted}),syncRunId).run();
+      WHERE sync_run_id=?`).bind(status,gamesFetched,gamesRead,logsInserted,logsUpdated,logsUnchanged,rejected,done?safeEnd:null,
+      JSON.stringify(details),syncRunId).run();
     await env.DB.prepare(`
       INSERT INTO data_source_status (source_name,dataset_name,status,last_attempt_at,last_success_at,
         last_complete_through_at,last_sync_run_id,expected_refresh_minutes,stale_after_minutes,
@@ -7118,9 +7149,9 @@ async function syncMlbPitcherGameLogs(
         last_complete_through_at=CASE WHEN excluded.status='HEALTHY' THEN excluded.last_complete_through_at ELSE data_source_status.last_complete_through_at END,
         last_sync_run_id=excluded.last_sync_run_id,consecutive_failures=CASE WHEN excluded.status='FAILED' THEN data_source_status.consecutive_failures+1 ELSE 0 END,
         record_count=excluded.record_count,status_message=excluded.status_message,metadata_json=excluded.metadata_json,updated_at=CURRENT_TIMESTAMP
-    `).bind(sourceStatus,status,safeEnd,syncRunId,status,
-      `${gamesRead} games found; ${gamesFetched} fetched; ${logsInserted} logs inserted; ${logsUpdated} updated; ${rejected} rejected.`,
-      JSON.stringify({start_date:safeStart,end_date:safeEnd,snapshots_inserted:snapshotsInserted})).run();
+    `).bind(sourceStatus,done&&status==="SUCCEEDED"?"SUCCEEDED":status,done?safeEnd:null,syncRunId,status,
+      `${gamesRead}/${totalGames} games in this batch; ${gamesFetched} fetched; ${logsInserted} logs inserted; ${logsUpdated} updated; ${logsUnchanged} unchanged; ${rejected} rejected.`,
+      JSON.stringify({start_date:safeStart,end_date:safeEnd,...details})).run();
     return {sync_run_id:syncRunId,status,start_date:safeStart,end_date:safeEnd,games_read:gamesRead,games_fetched:gamesFetched,
       logs_inserted:logsInserted,logs_updated:logsUpdated,logs_unchanged:logsUnchanged,snapshots_inserted:snapshotsInserted,rejected};
   } catch (error) {
@@ -7152,11 +7183,40 @@ async function runPitcherLogSync(request: Request, env: Env): Promise<Response> 
 
 async function autoSyncMlbPitcherLogs(env: Env, scheduledTime: number): Promise<void> {
   const local=chicagoDateParts(scheduledTime);
-  if (local.minute!==10) return;
-  // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_PITCHER_GAME_LOGS
-  if(!await kpropCronSyncMayStart(env,"PITCHER_GAME_LOGS",10)) return;
+  // KPROP_BUILD_9_5_2_PITCHER_GAME_LOGS_BOUNDED_RESUME
+  if (local.minute % 10 !== 0) return;
+  await env.DB.prepare(`
+    UPDATE sync_runs
+    SET status='FAILED', completed_at=CURRENT_TIMESTAMP, rows_rejected=rows_rejected+1,
+        details_json='{"error":"stale PITCHER_GAME_LOGS RUNNING run recovered by Build 9.5.2"}'
+    WHERE dataset_name='PITCHER_GAME_LOGS'
+      AND trigger_source='CRON'
+      AND status='RUNNING'
+      AND started_at < datetime('now','-15 minutes')
+  `).run();
+  if(!await kpropCronSyncMayStart(env,"PITCHER_GAME_LOGS",15)) return;
   const today=chicagoDateString(scheduledTime);
-  await syncMlbPitcherGameLogs(env,isoDateOffset(today,-2),today,"CRON");
+  const start=isoDateOffset(today,-2);
+  const latest=await env.DB.prepare(`
+    SELECT details_json
+    FROM sync_runs
+    WHERE dataset_name='PITCHER_GAME_LOGS'
+      AND trigger_source='CRON'
+      AND source_cursor_start=?
+      AND source_cursor_end=?
+      AND completed_at IS NOT NULL
+      AND status IN ('SUCCEEDED','PARTIAL')
+    ORDER BY sync_run_id DESC
+    LIMIT 1
+  `).bind(start,today).first<{details_json:string|null}>();
+  let offset=0;
+  if(latest?.details_json){
+    try{
+      const parsed=JSON.parse(latest.details_json) as {next_offset?:unknown;done?:unknown};
+      if(parsed.done!==true) offset=Math.max(0,Math.trunc(Number(parsed.next_offset??0)));
+    }catch{}
+  }
+  await syncMlbPitcherGameLogs(env,start,today,"CRON",{offset,limit:6});
 }
 
 interface GradeWarning {
