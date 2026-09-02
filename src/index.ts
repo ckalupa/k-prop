@@ -2915,7 +2915,7 @@ async function syncTeamStrikeoutSplits(
   triggerSource: "CRON" | "ADMIN" | "API" | "MANUAL" = "MANUAL",
 ): Promise<TeamSplitSyncResult> {
   const safeDate = validateDate(asOfDate);
-  const boundedLimit = 1;
+  const boundedLimit = triggerSource === "CRON" ? 6 : 1;
   const targets = await getCanonicalTeamSplitTargets(env);
   const total = targets.length;
   const startOffset = total === 0 ? 0 : Math.max(0, Math.trunc(offset || 0)) % total;
@@ -3342,7 +3342,10 @@ async function runPitcherDailyFeatureSync(request:Request,env:Env):Promise<Respo
 
 async function autoSyncPitcherDailyFeatures(env:Env,scheduledTime:number):Promise<void>{
   const local=chicagoDateParts(scheduledTime);
-  if (local.minute!==25) return;
+  if (local.hour !== 5 || local.minute !== 25) return;
+  // KPROP_BUILD_9_5_4_DAILY_FEATURE_CRON_THROTTLE:
+  // Daily pitcher features use game_date < as_of_date, so hourly reruns
+  // recalculate the same historical input set. Run once each Chicago morning.
   // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_PITCHER_DAILY_FEATURES
   if(!await kpropCronSyncMayStart(env,"PITCHER_DAILY_FEATURES",10)) return;
   await syncPitcherDailyFeatures(env,chicagoDateString(scheduledTime),'CRON');
@@ -3588,7 +3591,10 @@ async function runTeamDailyFeatureSync(request: Request, env: Env): Promise<Resp
 
 async function autoSyncTeamDailyFeatures(env: Env, scheduledTime: number): Promise<void> {
   const local = chicagoDateParts(scheduledTime);
-  if (local.minute !== 35) return;
+  if (local.hour !== 5 || local.minute !== 35) return;
+  // KPROP_BUILD_9_5_4_DAILY_FEATURE_CRON_THROTTLE:
+  // Daily team features consume the prior completed daily split snapshot.
+  // One Chicago-morning build is sufficient for the day's model inputs.
   // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_TEAM_DAILY_FEATURES
   if(!await kpropCronSyncMayStart(env,"TEAM_DAILY_FEATURES",10)) return;
   await syncTeamDailyFeatures(env,chicagoDateString(scheduledTime),'CRON');
@@ -4405,7 +4411,10 @@ async function runTeamSplitSync(request: Request, env: Env): Promise<Response> {
 
 async function autoSyncTeamStrikeoutSplits(env: Env, scheduledTime: number): Promise<void> {
   const local=chicagoDateParts(scheduledTime);
-  if (local.minute % 10 !== 0) return;
+  if (local.minute !== 10 || local.hour > 4) return;
+  // KPROP_BUILD_9_5_4_TEAM_SPLIT_DAILY_WINDOW:
+  // Six teams per hourly batch from 00:10 through 04:10 Chicago completes
+  // one 30-team rotation per day instead of repeating the league all day.
   // KPROP_BUILD_9_5_1_D1_WRITE_EFFICIENCY_CRON_GATE_TEAM_STRIKEOUT_SPLITS
   if(!await kpropCronSyncMayStart(env,"TEAM_STRIKEOUT_SPLITS",10)) return;
   const status=await env.DB.prepare(`SELECT metadata_json FROM data_source_status WHERE dataset_name='TEAM_STRIKEOUT_SPLITS'`).first<{metadata_json:string|null}>();
