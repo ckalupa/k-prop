@@ -8125,6 +8125,86 @@ function previousChicagoDate(timestamp: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+// KPROP_BUILD_9_5_5_DNP_STARTER_SWAP
+async function resolveFinalDnpPropsForBoard(
+  env: Env,
+  boardId: number,
+): Promise<{ voided: number; terminal_game_voids: number; warnings: string[] }> {
+  const board = await env.DB.prepare(`
+    SELECT board_id,board_date FROM boards WHERE board_id=?
+  `).bind(boardId).first<{board_id:number;board_date:string}>();
+  if(!board) return {voided:0,terminal_game_voids:0,warnings:["BOARD_NOT_FOUND"]};
+  if(String(board.board_date)>=chicagoDateString(Date.now())) return {voided:0,terminal_game_voids:0,warnings:[]};
+
+  const pending=await env.DB.prepare(`
+    SELECT p.prop_id,p.pitcher_id,pi.mlb_id,pi.current_team,ot.abbreviation opponent
+    FROM props p
+    JOIN pitchers pi ON pi.pitcher_id=p.pitcher_id
+    LEFT JOIN teams ot ON ot.team_id=p.opponent_team_id
+    LEFT JOIN prop_results pr ON pr.prop_id=p.prop_id
+    WHERE p.board_id=? AND (pr.prop_result_id IS NULL OR pr.result_status='PENDING')
+    ORDER BY p.prop_id
+  `).bind(boardId).all<{prop_id:number;pitcher_id:number;mlb_id:number|null;current_team:string|null;opponent:string|null}>();
+  if(!pending.results.length) return {voided:0,terminal_game_voids:0,warnings:[]};
+
+  const games=await env.DB.prepare(`
+    SELECT g.mlb_game_pk,g.game_status,g.status_detailed,
+           at.abbreviation away_team,ht.abbreviation home_team
+    FROM games g
+    LEFT JOIN teams at ON at.team_id=g.away_team_id
+    LEFT JOIN teams ht ON ht.team_id=g.home_team_id
+    WHERE COALESCE(g.official_date,g.game_date)=? AND g.mlb_game_pk IS NOT NULL
+    ORDER BY g.mlb_game_pk
+  `).bind(board.board_date).all<Record<string,unknown>>();
+
+  const finalState=(r:Record<string,unknown>)=>{
+    const s=`${String(r.game_status??"")} ${String(r.status_detailed??"")}`.toLowerCase();
+    return s.includes("final")||s.includes("game over")||s.includes("completed early");
+  };
+  const terminalVoid=(r:Record<string,unknown>)=>{
+    const s=`${String(r.game_status??"")} ${String(r.status_detailed??"")}`.toLowerCase();
+    return s.includes("postpon")||s.includes("cancel")||s.includes("forfeit");
+  };
+
+  let voided=0,terminalGameVoids=0;
+  const warnings:string[]=[];
+  for(const prop of pending.results){
+    const appeared=await env.DB.prepare(`
+      SELECT 1 hit FROM pitcher_game_stats WHERE pitcher_id=? AND game_date=?
+      UNION ALL
+      SELECT 1 hit FROM raw_pitcher_game_logs WHERE pitcher_id=? AND game_date=?
+      LIMIT 1
+    `).bind(prop.pitcher_id,board.board_date,prop.pitcher_id,board.board_date).first<{hit:number}>();
+    if(appeared?.hit) continue;
+
+    const pitcherTeam=normalizedMlbTeamAbbreviation(String(prop.current_team??""));
+    const opponent=normalizedMlbTeamAbbreviation(String(prop.opponent??""));
+    if(!pitcherTeam||!opponent){warnings.push(`prop ${prop.prop_id}: missing team/opponent linkage`);continue;}
+
+    const matches=games.results.filter((g)=>{
+      const away=normalizedMlbTeamAbbreviation(String(g.away_team??""));
+      const home=normalizedMlbTeamAbbreviation(String(g.home_team??""));
+      return (away===pitcherTeam&&home===opponent)||(home===pitcherTeam&&away===opponent);
+    });
+    if(matches.length!==1){warnings.push(`prop ${prop.prop_id}: expected one ${pitcherTeam}-${opponent} game, found ${matches.length}`);continue;}
+
+    const game=matches[0];
+    if(!finalState(game)&&!terminalVoid(game)) continue;
+    const reason=terminalVoid(game)?"POSTPONED_OR_CANCELLED":"DNP_OR_STARTER_CHANGE";
+    const source=`MLB Stats API / games table: ${String(game.status_detailed??game.game_status??"terminal")}; ${reason}`;
+
+    await env.DB.prepare(`
+      INSERT INTO prop_results(prop_id,actual_strikeouts,result,result_status,source,graded_at,created_at)
+      VALUES (?,NULL,'VOID','GRADED',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+      ON CONFLICT(prop_id) DO UPDATE SET
+        actual_strikeouts=NULL,result='VOID',result_status='GRADED',
+        source=excluded.source,graded_at=CURRENT_TIMESTAMP
+    `).bind(prop.prop_id,source).run();
+    voided++;
+    if(terminalVoid(game)) terminalGameVoids++;
+  }
+  return {voided,terminal_game_voids:terminalGameVoids,warnings};
+}
 async function autoRefreshPregameBoards(env: Env, scheduledTime: number): Promise<void> {
   const boardDate = chicagoDateString(scheduledTime);
   const boards = await env.DB.prepare(`
@@ -8277,6 +8357,10 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
   try {
     // Six pending pitchers per run keeps outbound MLB calls bounded. The next
     // ten-minute cron tick resumes automatically until pending reaches zero.
+    const autoDnpResolution = await resolveFinalDnpPropsForBoard(env, board.board_id);
+    if (autoDnpResolution.voided || autoDnpResolution.warnings.length) {
+      console.log("AUTO_GRADE DNP resolution", { board_id: board.board_id, ...autoDnpResolution });
+    }
     const response = await gradeBoardResults(env, systemIdentity, board.board_id, 6);
     const payload = await response.json<Record<string, unknown>>();
 
@@ -8337,6 +8421,9 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
       created_board_id: createdBoardId,
       warnings: payload.warnings,
       retry_mode: "BOUNDED_RESUMABLE",
+      auto_voided_dnp: autoDnpResolution.voided,
+      auto_voided_terminal_game: autoDnpResolution.terminal_game_voids,
+      dnp_resolution_warnings: autoDnpResolution.warnings,
     };
 
     await env.DB.prepare(`
