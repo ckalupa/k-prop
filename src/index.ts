@@ -2689,11 +2689,16 @@ interface MlbScheduleGameForSplit {
 }
 
 function normalizedMlbTeamAbbreviation(value: string): string {
-  return String(value ?? "")
+  const normalized = String(value ?? "")
     .trim()
     .toUpperCase()
     .replace(/^@\s*/, "")
     .replace(/[^A-Z]/g, "");
+
+  const mlbTeamId = MLB_TEAM_IDS[normalized];
+  return mlbTeamId
+    ? (MLB_TEAM_ABBREVIATIONS[mlbTeamId] ?? normalized)
+    : normalized;
 }
 
 async function getCanonicalTeamSplitTargets(env: Env): Promise<TeamSplitTarget[]> {
