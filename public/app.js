@@ -116,7 +116,17 @@ function dashboardConfirmationCell(row) {
   const score = c.score > 0 ? `+${c.score}` : String(c.score);
   const residual = `${c.residual >= 0 ? "+" : ""}${Number(c.residual).toFixed(2)} K`;
 
-  return `<span title="Research only. Prior graded props only; shrunk market residual. Does not change v14 direction or probability."><strong>${escapeHtml(score)}</strong><br><small>${escapeHtml(c.label)}</small><br><small>${escapeHtml(residual)} · n=${c.priorN}</small></span>`;
+  const shortLabel = {
+    "MODERATE": "MOD",
+    "STRONG": "STRONG",
+    "ELITE": "ELITE",
+    "EXTREME": "EXTREME",
+    "CONFLICT": "CONFLICT",
+    "STRONG CONFLICT": "STRONG CONFLICT",
+    "NEUTRAL": "NEUTRAL",
+  }[c.label] || c.label;
+
+  return `<span class="confirm-signal confirm-score-${c.score}" title="Research only. Prior graded props only; shrunk market residual. ${residual}, n=${c.priorN}. Does not change v14 direction or probability."><strong>${escapeHtml(score)}</strong><small>${escapeHtml(shortLabel)}</small><small>${escapeHtml(residual)} · n=${c.priorN}</small></span>`;
 }
 function renderRows() {
   const rows = filteredRows();

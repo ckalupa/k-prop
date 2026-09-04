@@ -421,3 +421,171 @@ tbody tr:hover { background: rgba(66, 105, 135, .12); }
   body.daily-board-page .topbar-button,
   body.daily-board-page .status-wrap button { max-width: 100%; box-sizing: border-box; }
 }
+
+/* Build 9.5.7.2 — responsive daily dashboard */
+body.daily-board-page .daily-board-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+body.daily-board-page .daily-board-table th,
+body.daily-board-page .daily-board-table td {
+  padding: .62rem .48rem;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+body.daily-board-page .daily-board-table th { font-size: .68rem; }
+body.daily-board-page .daily-board-table td { font-size: .91rem; }
+
+body.daily-board-page .daily-board-table .reason {
+  min-width: 0;
+  width: auto;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+body.daily-board-page .confirm-signal {
+  display: inline-grid;
+  gap: .08rem;
+  line-height: 1.08;
+  white-space: nowrap;
+}
+
+body.daily-board-page .confirm-signal strong { font-size: 1rem; }
+
+body.daily-board-page .confirm-signal small {
+  display: block;
+  font-size: .66rem;
+  color: var(--muted);
+}
+
+body.daily-board-page .confirm-score-1 strong,
+body.daily-board-page .confirm-score-2 strong,
+body.daily-board-page .confirm-score-3 strong { color: var(--accent); }
+
+body.daily-board-page .confirm-score--1 strong,
+body.daily-board-page .confirm-score--2 strong { color: var(--danger); }
+
+@media (min-width: 1101px) {
+  body.daily-board-page .daily-board-table th:nth-child(1),
+  body.daily-board-page .daily-board-table td:nth-child(1) { width: 7.5%; }
+  body.daily-board-page .daily-board-table th:nth-child(2),
+  body.daily-board-page .daily-board-table td:nth-child(2) { width: 4%; }
+  body.daily-board-page .daily-board-table th:nth-child(3),
+  body.daily-board-page .daily-board-table td:nth-child(3) { width: 3.8%; }
+  body.daily-board-page .daily-board-table th:nth-child(4),
+  body.daily-board-page .daily-board-table td:nth-child(4) { width: 6%; }
+  body.daily-board-page .daily-board-table th:nth-child(5),
+  body.daily-board-page .daily-board-table td:nth-child(5) { width: 4.4%; }
+  body.daily-board-page .daily-board-table th:nth-child(6),
+  body.daily-board-page .daily-board-table td:nth-child(6) { width: 4.8%; }
+  body.daily-board-page .daily-board-table th:nth-child(7),
+  body.daily-board-page .daily-board-table td:nth-child(7) { width: 4.5%; }
+  body.daily-board-page .daily-board-table th:nth-child(8),
+  body.daily-board-page .daily-board-table td:nth-child(8) { width: 7.8%; }
+  body.daily-board-page .daily-board-table th:nth-child(9),
+  body.daily-board-page .daily-board-table td:nth-child(9) { width: 7.2%; }
+  body.daily-board-page .daily-board-table th:nth-child(10),
+  body.daily-board-page .daily-board-table td:nth-child(10) { width: 7%; }
+  body.daily-board-page .daily-board-table th:nth-child(11),
+  body.daily-board-page .daily-board-table td:nth-child(11) { width: 6.5%; }
+  body.daily-board-page .daily-board-table th:nth-child(12),
+  body.daily-board-page .daily-board-table td:nth-child(12) { width: 5.2%; }
+  body.daily-board-page .daily-board-table th:nth-child(13),
+  body.daily-board-page .daily-board-table td:nth-child(13) { width: 6%; }
+  body.daily-board-page .daily-board-table th:nth-child(14),
+  body.daily-board-page .daily-board-table td:nth-child(14) { width: 8.5%; }
+  body.daily-board-page .daily-board-table th:nth-child(15),
+  body.daily-board-page .daily-board-table td:nth-child(15) { width: 16.8%; }
+
+  body.daily-board-page .table-scroll { overflow-x: hidden; }
+}
+
+@media (max-width: 1100px) {
+  html, body.daily-board-page { max-width: 100%; overflow-x: hidden; }
+
+  body.daily-board-page main,
+  body.daily-board-page .results-section,
+  body.daily-board-page .table-card,
+  body.daily-board-page .table-scroll {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0 !important;
+    box-sizing: border-box;
+  }
+
+  body.daily-board-page .table-scroll { overflow: visible; }
+
+  body.daily-board-page .daily-board-table {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0 !important;
+  }
+
+  body.daily-board-page .daily-board-table thead { display: none; }
+  body.daily-board-page .daily-board-table tbody { display: block; width: 100%; }
+
+  body.daily-board-page .daily-board-table tbody tr {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    margin-bottom: .7rem;
+    padding: .35rem 0;
+    border: 1px solid rgba(38,56,73,.9);
+    border-radius: .8rem;
+    box-sizing: border-box;
+  }
+
+  body.daily-board-page .daily-board-table tbody td {
+    display: grid;
+    grid-template-columns: minmax(105px, 34%) minmax(0, 1fr);
+    gap: .65rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0 !important;
+    box-sizing: border-box;
+    padding: .48rem .75rem;
+    border-bottom: 0;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  body.daily-board-page .daily-board-table tbody td::before {
+    color: var(--muted);
+    font-size: .68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  body.daily-board-page #board-body td:nth-child(1)::before { content: "Pitcher"; }
+  body.daily-board-page #board-body td:nth-child(2)::before { content: "Opp"; }
+  body.daily-board-page #board-body td:nth-child(3)::before { content: "Line"; }
+  body.daily-board-page #board-body td:nth-child(4)::before { content: "Projection"; }
+  body.daily-board-page #board-body td:nth-child(5)::before { content: "Edge"; }
+  body.daily-board-page #board-body td:nth-child(6)::before { content: "Over %"; }
+  body.daily-board-page #board-body td:nth-child(7)::before { content: "Side"; }
+  body.daily-board-page #board-body td:nth-child(8)::before { content: "Confidence"; }
+  body.daily-board-page #board-body td:nth-child(9)::before { content: "Confirm"; }
+  body.daily-board-page #board-body td:nth-child(10)::before { content: "Tier"; }
+  body.daily-board-page #board-body td:nth-child(11)::before { content: "Decision"; }
+  body.daily-board-page #board-body td:nth-child(12)::before { content: "Actual Ks"; }
+  body.daily-board-page #board-body td:nth-child(13)::before { content: "Market Result"; }
+  body.daily-board-page #board-body td:nth-child(14)::before { content: "Recommendation Result"; }
+  body.daily-board-page #board-body td:nth-child(15)::before { content: "Reason"; }
+
+  body.daily-board-page .confirm-signal { white-space: normal; }
+  body.daily-board-page .confirm-signal small:last-child { font-size: .72rem; }
+}
+
+@media (max-width: 430px) {
+  body.daily-board-page .daily-board-table tbody td {
+    grid-template-columns: minmax(88px, 32%) minmax(0, 1fr);
+    gap: .5rem;
+    padding-inline: .65rem;
+  }
+}
