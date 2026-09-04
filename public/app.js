@@ -115,9 +115,8 @@ function dashboardConfirmationCell(row) {
 
   const score = c.score > 0 ? `+${c.score}` : String(c.score);
   const residual = `${c.residual >= 0 ? "+" : ""}${Number(c.residual).toFixed(2)} K`;
-
-  const shortLabel = {
-    "MODERATE": "MOD",
+  const displayLabel = {
+    "MODERATE": "SUPPORT",
     "STRONG": "STRONG",
     "ELITE": "ELITE",
     "EXTREME": "EXTREME",
@@ -126,7 +125,13 @@ function dashboardConfirmationCell(row) {
     "NEUTRAL": "NEUTRAL",
   }[c.label] || c.label;
 
-  return `<span class="confirm-signal confirm-score-${c.score}" title="Research only. Prior graded props only; shrunk market residual. ${residual}, n=${c.priorN}. Does not change v14 direction or probability."><strong>${escapeHtml(score)}</strong><small>${escapeHtml(shortLabel)}</small><small>${escapeHtml(residual)} · n=${c.priorN}</small></span>`;
+  const historyText = `${residual} · ${c.priorN} prior prop${c.priorN === 1 ? "" : "s"}`;
+
+  return `<details class="history-signal history-score-${c.score}">
+    <summary><strong>${escapeHtml(score)}</strong> ${escapeHtml(displayLabel)}</summary>
+    <small>${escapeHtml(historyText)}</small>
+    <small>Research only; does not change v14's pick or probability.</small>
+  </details>`;
 }
 function renderRows() {
   const rows = filteredRows();
@@ -163,12 +168,14 @@ function renderRows() {
         <td class="num">${number(row.actual_strikeouts, 0)}</td>
         <td class="${outcomeClass(row.result)}">${escapeHtml(row.result ?? row.result_status ?? "—")}</td>
         <td class="${outcomeClass(recommendationOutcome(row))}">${escapeHtml(recommendationOutcome(row))}</td>
-        <td class="reason">${escapeHtml(
-          row.final_reason ??
-          (row.result_status && row.result_status !== "PENDING"
-            ? "Actual result is available; original recommendation was not stored."
-            : "")
-        )}</td>
+        <td class="reason">${(() => {
+          const reasonText = row.final_reason ??
+            (row.result_status && row.result_status !== "PENDING"
+              ? "Actual result is available; original recommendation was not stored."
+              : "");
+          if (!reasonText) return `<span class="subtle">—</span>`;
+          return `<details class="reason-details"><summary>View reason</summary><div>${escapeHtml(reasonText)}</div></details>`;
+        })()}</td>
       </tr>
     `;
   }).join("");

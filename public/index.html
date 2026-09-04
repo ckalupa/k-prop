@@ -87,6 +87,15 @@
       </label>
     </section>
 
+    <details class="board-guide">
+      <summary>How to read this board</summary>
+      <div class="board-guide-grid">
+        <div><strong>Decision</strong><span>PLAY is the strongest recommendation. WATCH means the model sees something, but not enough to recommend it.</span></div>
+        <div><strong>Confidence</strong><span>v14's estimated confidence in the MORE or LESS direction.</span></div>
+        <div><strong>History Signal</strong><span>Research-only check of how the pitcher has performed versus prior posted K lines. Positive supports v14; negative conflicts. It does not change the pick.</span></div>
+        <div><strong>Reason</strong><span>Tap or click to see the underlying explanation for the recommendation.</span></div>
+      </div>
+    </details>
     <section class="table-card">
       <div id="error-box" class="error hidden"></div>
       <div id="history-notice" class="history-notice hidden"></div>
@@ -102,7 +111,7 @@
               <th>Over %</th>
               <th>Side</th>
               <th>Confidence</th>
-              <th>Confirm</th>
+              <th>History Signal</th>
               <th>Tier</th>
               <th>Decision</th>
               <th>Actual Ks</th>

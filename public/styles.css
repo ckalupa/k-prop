@@ -570,7 +570,7 @@ body.daily-board-page .confirm-score--2 strong { color: var(--danger); }
   body.daily-board-page #board-body td:nth-child(6)::before { content: "Over %"; }
   body.daily-board-page #board-body td:nth-child(7)::before { content: "Side"; }
   body.daily-board-page #board-body td:nth-child(8)::before { content: "Confidence"; }
-  body.daily-board-page #board-body td:nth-child(9)::before { content: "Confirm"; }
+  body.daily-board-page #board-body td:nth-child(9)::before { content: "History Signal"; }
   body.daily-board-page #board-body td:nth-child(10)::before { content: "Tier"; }
   body.daily-board-page #board-body td:nth-child(11)::before { content: "Decision"; }
   body.daily-board-page #board-body td:nth-child(12)::before { content: "Actual Ks"; }
@@ -587,5 +587,123 @@ body.daily-board-page .confirm-score--2 strong { color: var(--danger); }
     grid-template-columns: minmax(88px, 32%) minmax(0, 1fr);
     gap: .5rem;
     padding-inline: .65rem;
+  }
+}
+/* Build 9.5.7.3 — board explainability */
+body.daily-board-page .board-guide {
+  margin: 0 0 1rem;
+  border: 1px solid var(--border);
+  border-radius: .9rem;
+  background: rgba(255,255,255,.025);
+  overflow: hidden;
+}
+
+body.daily-board-page .board-guide > summary {
+  cursor: pointer;
+  padding: .85rem 1rem;
+  font-weight: 800;
+  color: #fff;
+}
+
+body.daily-board-page .board-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .8rem;
+  padding: 0 1rem 1rem;
+}
+
+body.daily-board-page .board-guide-grid > div {
+  display: grid;
+  gap: .3rem;
+  padding: .75rem;
+  border: 1px solid rgba(38,56,73,.75);
+  border-radius: .7rem;
+}
+
+body.daily-board-page .board-guide-grid strong {
+  font-size: .78rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+body.daily-board-page .board-guide-grid span {
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.4;
+}
+
+body.daily-board-page .history-signal,
+body.daily-board-page .reason-details {
+  margin: 0;
+}
+
+body.daily-board-page .history-signal summary,
+body.daily-board-page .reason-details summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+body.daily-board-page .history-signal summary::-webkit-details-marker,
+body.daily-board-page .reason-details summary::-webkit-details-marker {
+  display: none;
+}
+
+body.daily-board-page .history-signal summary {
+  font-size: .74rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+body.daily-board-page .history-signal[open] summary {
+  margin-bottom: .3rem;
+}
+
+body.daily-board-page .history-signal small {
+  display: block;
+  color: var(--muted);
+  font-size: .67rem;
+  line-height: 1.28;
+}
+
+body.daily-board-page .history-score-1 summary,
+body.daily-board-page .history-score-2 summary,
+body.daily-board-page .history-score-3 summary {
+  color: var(--accent);
+}
+
+body.daily-board-page .history-score--1 summary,
+body.daily-board-page .history-score--2 summary {
+  color: var(--danger);
+}
+
+body.daily-board-page .reason-details summary {
+  color: var(--accent);
+  font-size: .78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+body.daily-board-page .reason-details div {
+  margin-top: .35rem;
+  color: var(--muted);
+  font-size: .78rem;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+@media (max-width: 1100px) {
+  body.daily-board-page .board-guide-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  body.daily-board-page .history-signal summary,
+  body.daily-board-page .reason-details summary {
+    white-space: normal;
+  }
+}
+
+@media (max-width: 600px) {
+  body.daily-board-page .board-guide-grid {
+    grid-template-columns: 1fr;
   }
 }
