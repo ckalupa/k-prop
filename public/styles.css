@@ -707,3 +707,42 @@ body.daily-board-page .reason-details div {
     grid-template-columns: 1fr;
   }
 }
+/* Build 9.5.7.4 — expanded board guide */
+body.daily-board-page .board-guide-wide {
+  grid-column: 1 / -1;
+}
+
+body.daily-board-page .board-guide-wide > span {
+  margin-bottom: .2rem;
+}
+
+body.daily-board-page .board-guide-wide ul {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .45rem .9rem;
+  margin: .35rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.4;
+}
+
+body.daily-board-page .board-guide-wide li {
+  padding-right: .4rem;
+}
+
+body.daily-board-page .board-guide-wide b {
+  color: #fff;
+}
+
+@media (max-width: 900px) {
+  body.daily-board-page .board-guide-wide ul {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  body.daily-board-page .board-guide-wide ul {
+    grid-template-columns: 1fr;
+  }
+}

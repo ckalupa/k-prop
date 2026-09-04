@@ -90,10 +90,23 @@
     <details class="board-guide">
       <summary>How to read this board</summary>
       <div class="board-guide-grid">
-        <div><strong>Decision</strong><span>PLAY is the strongest recommendation. WATCH means the model sees something, but not enough to recommend it.</span></div>
-        <div><strong>Confidence</strong><span>v14's estimated confidence in the MORE or LESS direction.</span></div>
+        <div><strong>Decision</strong><span>PLAY is a recommended prop. WATCH means the model sees a directional edge, but the full profile is not strong enough for a PLAY.</span></div>
+        <div><strong>Confidence</strong><span>v14's estimated confidence in the MORE or LESS direction. It is model confidence, not a guarantee of the outcome.</span></div>
+        <div><strong>Tier</strong><span>Priority within the model's recommendation set. CORE is the strongest overall profile, SECONDARY is a solid qualifying setup, and LEAN is a lower-priority directional read.</span></div>
         <div><strong>History Signal</strong><span>Research-only check of how the pitcher has performed versus prior posted K lines. Positive supports v14; negative conflicts. It does not change the pick.</span></div>
-        <div><strong>Reason</strong><span>Tap or click to see the underlying explanation for the recommendation.</span></div>
+
+        <div class="board-guide-wide">
+          <strong>What's inside Reason?</strong>
+          <span>The detailed reason shows the inputs behind the recommendation:</span>
+          <ul>
+            <li><b>Projection / edge</b> — projected strikeouts versus today's posted line.</li>
+            <li><b>Form</b> — recent strikeout production such as L3, L5 and L10 starts.</li>
+            <li><b>Volume</b> — batters faced, pitch count and starter workload/role.</li>
+            <li><b>Opponent</b> — opponent strikeout rates, recent splits and the blended matchup estimate.</li>
+            <li><b>Same opponent</b> — prior starts against this opponent when available; informational only.</li>
+            <li><b>Calibration</b> — how similar historical model recommendations performed; used as supporting context.</li>
+          </ul>
+        </div>
       </div>
     </details>
     <section class="table-card">
