@@ -441,6 +441,28 @@ async function getDashboard(env: Env, url: URL): Promise<Response> {
       r.model_edge,
       r.estimated_over_rate,
       r.preferred_side,
+      (
+        SELECT COUNT(*)
+        FROM props hp
+        JOIN boards hb ON hb.board_id = hp.board_id
+        JOIN prop_results hpr ON hpr.prop_id = hp.prop_id
+        WHERE hp.pitcher_id = p.pitcher_id
+          AND hb.board_date < (SELECT board_date FROM boards WHERE board_id = p.board_id)
+          AND hpr.result_status = 'GRADED'
+          AND hpr.result IN ('OVER','UNDER')
+          AND hpr.actual_strikeouts IS NOT NULL
+      ) AS market_residual_prior_n,
+      (
+        SELECT AVG(hpr.actual_strikeouts - hp.strikeout_line)
+        FROM props hp
+        JOIN boards hb ON hb.board_id = hp.board_id
+        JOIN prop_results hpr ON hpr.prop_id = hp.prop_id
+        WHERE hp.pitcher_id = p.pitcher_id
+          AND hb.board_date < (SELECT board_date FROM boards WHERE board_id = p.board_id)
+          AND hpr.result_status = 'GRADED'
+          AND hpr.result IN ('OVER','UNDER')
+          AND hpr.actual_strikeouts IS NOT NULL
+      ) AS market_residual_prior_avg,
       r.confidence_score,
       r.confidence_band,
       r.recommendation_score,

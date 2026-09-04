@@ -79,12 +79,51 @@ function filteredRows() {
   });
 }
 
+function dashboardConfirmationResearch(row) {
+  const priorN = Number(row.market_residual_prior_n || 0);
+  const priorAvg = Number(row.market_residual_prior_avg);
+  const side = String(row.preferred_side || "").toUpperCase();
+
+  if (priorN < 3 || !Number.isFinite(priorAvg) || (side !== "MORE" && side !== "LESS")) {
+    return { score: 0, label: "—", residual: null, priorN };
+  }
+
+  const shrunk = priorAvg * priorN / (priorN + 5);
+  const aligned = side === "MORE" ? shrunk : -shrunk;
+  const strength = Math.abs(shrunk);
+
+  if (aligned >= 0.50) {
+    if (strength < 0.75) return { score: 1, label: "MODERATE", residual: shrunk, priorN };
+    if (strength < 1.00) return { score: 2, label: "STRONG", residual: shrunk, priorN };
+    if (strength < 1.25) return { score: 3, label: "ELITE", residual: shrunk, priorN };
+    return { score: 1, label: "EXTREME", residual: shrunk, priorN };
+  }
+
+  if (aligned <= -0.50) {
+    if (strength < 0.75) return { score: -1, label: "CONFLICT", residual: shrunk, priorN };
+    return { score: -2, label: "STRONG CONFLICT", residual: shrunk, priorN };
+  }
+
+  return { score: 0, label: "NEUTRAL", residual: shrunk, priorN };
+}
+
+function dashboardConfirmationCell(row) {
+  const c = dashboardConfirmationResearch(row);
+  if (c.label === "—") {
+    return `<span class="subtle" title="Research only; fewer than 3 prior graded props.">—</span>`;
+  }
+
+  const score = c.score > 0 ? `+${c.score}` : String(c.score);
+  const residual = `${c.residual >= 0 ? "+" : ""}${Number(c.residual).toFixed(2)} K`;
+
+  return `<span title="Research only. Prior graded props only; shrunk market residual. Does not change v14 direction or probability."><strong>${escapeHtml(score)}</strong><br><small>${escapeHtml(c.label)}</small><br><small>${escapeHtml(residual)} · n=${c.priorN}</small></span>`;
+}
 function renderRows() {
   const rows = filteredRows();
   const body = $("#board-body");
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="14" class="loading">No matching props.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="15" class="loading">No matching props.</td></tr>`;
     return;
   }
 
@@ -105,7 +144,8 @@ function renderRows() {
         <td class="num">${percent(row.estimated_over_rate)}</td>
         <td>${escapeHtml(row.preferred_side ?? "—")}</td>
         <td class="num">${number(row.confidence_score, 1)} ${row.confidence_band ? `<small>${escapeHtml(row.confidence_band)}</small>` : ""}</td>
-        <td>${escapeHtml(row.decision_tier ?? "—")}</td>
+                <td>${dashboardConfirmationCell(row)}</td>
+<td>${escapeHtml(row.decision_tier ?? "—")}</td>
         <td>${row.model_decision
           ? `<span class="badge ${badgeClass(row.model_decision)}">${escapeHtml(row.model_decision)}</span>`
           : `<span class="badge history-missing">Not stored</span>`}
@@ -376,7 +416,7 @@ async function loadDashboard(boardId = state.selectedBoardId) {
     $("#api-status").className = "status bad";
     $("#error-box").textContent = error instanceof Error ? error.message : String(error);
     $("#error-box").classList.remove("hidden");
-    $("#board-body").innerHTML = `<tr><td colspan="14" class="loading">Unable to load board.</td></tr>`;
+    $("#board-body").innerHTML = `<tr><td colspan="15" class="loading">Unable to load board.</td></tr>`;
   }
 }
 
