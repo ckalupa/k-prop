@@ -1170,6 +1170,28 @@ const board = await env.DB.prepare(`
       r.model_edge,
       r.estimated_over_rate,
       r.preferred_side,
+      (
+        SELECT COUNT(*)
+        FROM props hp
+        JOIN boards hb ON hb.board_id = hp.board_id
+        JOIN prop_results hpr ON hpr.prop_id = hp.prop_id
+        WHERE hp.pitcher_id = p.pitcher_id
+          AND hb.board_date < b.board_date
+          AND hpr.result_status = 'GRADED'
+          AND hpr.result IN ('OVER', 'UNDER')
+          AND hpr.actual_strikeouts IS NOT NULL
+      ) AS market_residual_prior_n,
+      (
+        SELECT AVG(hpr.actual_strikeouts - hp.strikeout_line)
+        FROM props hp
+        JOIN boards hb ON hb.board_id = hp.board_id
+        JOIN prop_results hpr ON hpr.prop_id = hp.prop_id
+        WHERE hp.pitcher_id = p.pitcher_id
+          AND hb.board_date < b.board_date
+          AND hpr.result_status = 'GRADED'
+          AND hpr.result IN ('OVER', 'UNDER')
+          AND hpr.actual_strikeouts IS NOT NULL
+      ) AS market_residual_prior_avg,
       r.projection_status,
       r.confidence_score,
       r.confidence_band,
@@ -1931,13 +1953,27 @@ function optionalNumber(value: unknown): number | null {
 }
 
 async function fetchMlbJson(url: string): Promise<Record<string, unknown>> {
-  const response = await fetch(url, {
-    headers: { accept: "application/json" },
-  });
-  if (!response.ok) {
-    throw new Error(`MLB Stats API returned HTTP ${response.status}.`);
+  const controller = new AbortController();
+  const timeoutMs = 8000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`MLB Stats API returned HTTP ${response.status}.`);
+    }
+    return await response.json() as Record<string, unknown>;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`MLB Stats API request timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  return await response.json() as Record<string, unknown>;
 }
 
 async function findExactMlbPitcher(canonicalName: string): Promise<MlbPerson> {
@@ -8308,7 +8344,7 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
         )
     WHERE run_type = 'MORNING_GRADE'
       AND status = 'RUNNING'
-      AND datetime(started_at) <= datetime('now', '-8 minutes')
+      AND datetime(started_at) <= datetime('now', '-12 minutes')
   `).run();
 
   const board = await env.DB.prepare(`
@@ -8431,12 +8467,15 @@ async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<
       dnp_resolution_warnings: autoDnpResolution.warnings,
     };
 
+    const gamesChecked = Number(payload.refresh_candidates ?? 0);
+    const propsMatched = Number(payload.graded ?? 0);
+
     await env.DB.prepare(`
       UPDATE automation_runs
       SET completed_at = CURRENT_TIMESTAMP, status = 'SUCCESS',
-          props_matched = ?, details = ?
+          games_checked = ?, props_matched = ?, details = ?
       WHERE automation_run_id = ?
-    `).bind(Number(payload.graded ?? 0), JSON.stringify(gradeDetails), runId).run();
+    `).bind(gamesChecked, propsMatched, JSON.stringify(gradeDetails), runId).run();
 
     try {
       await recordLiveShadowCertificationMonitoring(env, scheduledTime, "AUTO_POST_GRADE");
@@ -12640,17 +12679,21 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
-    ctx.waitUntil(Promise.all([
-      autoSyncMlbSchedule(env, controller.scheduledTime),
-      autoSyncMlbPitcherLogs(env, controller.scheduledTime),
-      autoSyncTeamStrikeoutSplits(env, controller.scheduledTime),
-      autoSyncPitcherDailyFeatures(env, controller.scheduledTime),
-      autoSyncTeamDailyFeatures(env, controller.scheduledTime),
-      autoRefreshPregameBoards(env, controller.scheduledTime),
+    ctx.waitUntil(
       autoGradePreviousBoard(env, controller.scheduledTime)
         .then(() => settleTrackedPlays(env))
-        .then(() => undefined),
-    ]).then(() => undefined));
+        .then(() =>
+          Promise.all([
+            autoSyncMlbSchedule(env, controller.scheduledTime),
+            autoSyncMlbPitcherLogs(env, controller.scheduledTime),
+            autoSyncTeamStrikeoutSplits(env, controller.scheduledTime),
+            autoSyncPitcherDailyFeatures(env, controller.scheduledTime),
+            autoSyncTeamDailyFeatures(env, controller.scheduledTime),
+            autoRefreshPregameBoards(env, controller.scheduledTime),
+          ])
+        )
+        .then(() => undefined)
+    );
   },
 } satisfies ExportedHandler<Env>;
 

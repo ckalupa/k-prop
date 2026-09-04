@@ -125,13 +125,50 @@ function checked(value) {
   return Number(value) === 1 ? "checked" : "";
 }
 
-function recommendationScoreCell(row) {
-  if (row.recommendation_score == null) return "—";
-  const score = Math.round(Number(row.recommendation_score));
-  const band = row.recommendation_band || "UNRANKED";
-  return `<div class="v11-score ${decisionClass(band)}"><strong>${score}</strong><span>${escapeHtml(band)}</span></div>`;
+function confirmationResearch(row) {
+  const priorN = Number(row.market_residual_prior_n || 0);
+  const priorAvg = Number(row.market_residual_prior_avg);
+  const side = String(row.preferred_side || "").toUpperCase();
+
+  if (priorN < 3 || !Number.isFinite(priorAvg) || (side !== "MORE" && side !== "LESS")) {
+    return { score: 0, label: "INSUFFICIENT", residual: null, priorN };
+  }
+
+  const shrunk = priorAvg * priorN / (priorN + 5);
+  const aligned = side === "MORE" ? shrunk : -shrunk;
+  const strength = Math.abs(shrunk);
+
+  if (aligned >= 0.50) {
+    if (strength < 0.75) return { score: 1, label: "MODERATE", residual: shrunk, priorN };
+    if (strength < 1.00) return { score: 2, label: "STRONG", residual: shrunk, priorN };
+    if (strength < 1.25) return { score: 3, label: "ELITE", residual: shrunk, priorN };
+    return { score: 1, label: "EXTREME", residual: shrunk, priorN };
+  }
+
+  if (aligned <= -0.50) {
+    if (strength < 0.75) return { score: -1, label: "CONFLICT", residual: shrunk, priorN };
+    return { score: -2, label: "STRONG CONFLICT", residual: shrunk, priorN };
+  }
+
+  return { score: 0, label: "NEUTRAL", residual: shrunk, priorN };
 }
 
+function confirmationBadge(row) {
+  const c = confirmationResearch(row);
+  if (c.label === "INSUFFICIENT") {
+    return `<span class="subtle" title="Research-only market residual confirmation; fewer than 3 prior graded props.">Confirm —</span>`;
+  }
+  const score = c.score > 0 ? `+${c.score}` : String(c.score);
+  const residual = `${c.residual >= 0 ? "+" : ""}${formatNumber(c.residual, 2)} K`;
+  return `<span class="subtle" title="Research only. Prior graded props only; shrunk historical market residual. Does not change v14 direction, probability, grading, calibration, promotion, or guardrail logic.">Confirm ${score} · ${escapeHtml(c.label)} · ${residual} · n=${c.priorN}</span>`;
+}
+
+function recommendationScoreCell(row) {
+  if (row.recommendation_score == null) return `—<br>${confirmationBadge(row)}`;
+  const score = Math.round(Number(row.recommendation_score));
+  const band = row.recommendation_band || "UNRANKED";
+  return `<div class="v11-score ${decisionClass(band)}"><strong>${score}</strong><span>${escapeHtml(band)}</span></div>${confirmationBadge(row)}`;
+}
 function recommendationBreakdownCell(row) {
   if (row.recommendation_score == null) return "—";
   const item = (name, value, max) => `<span><small>${escapeHtml(name)}</small><strong>${formatNumber(value, 1)} / ${max}</strong></span>`;
