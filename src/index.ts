@@ -7844,12 +7844,29 @@ async function gradeBoardResults(
     refreshedPitchers.add(prop.pitcher_id);
 
     try {
-      let mlbId = prop.mlb_id == null ? null : Number(prop.mlb_id);
-      if (!mlbId) {
-        mlbId = await resolveMlbId(env, prop.pitcher_id, prop.canonical_name);
+      // Build 9.6.3: the dedicated pitcher-log sync may already have the final
+      // same-day line in raw_pitcher_game_logs. Do not spend two MLB subrequests
+      // refreshing current team + the pitcher's full-season game log when the
+      // authoritative synced final line is already local.
+      const localFinalRaw = await env.DB.prepare(`
+        SELECT pitcher_game_log_id
+        FROM raw_pitcher_game_logs
+        WHERE pitcher_id = ?
+          AND game_date = ?
+          AND strikeouts IS NOT NULL
+          AND lower(COALESCE(game_status, '')) IN ('final', 'game over', 'completed early')
+        ORDER BY pitcher_game_log_id DESC
+        LIMIT 1
+      `).bind(prop.pitcher_id, board.board_date).first<{ pitcher_game_log_id: number }>();
+
+      if (!localFinalRaw) {
+        let mlbId = prop.mlb_id == null ? null : Number(prop.mlb_id);
+        if (!mlbId) {
+          mlbId = await resolveMlbId(env, prop.pitcher_id, prop.canonical_name);
+        }
+        await refreshPitcherCurrentTeam(env, prop.pitcher_id, mlbId);
+        await loadPitcherGameLog(env, prop.pitcher_id, mlbId, season);
       }
-      await refreshPitcherCurrentTeam(env, prop.pitcher_id, mlbId);
-      await loadPitcherGameLog(env, prop.pitcher_id, mlbId, season);
     } catch (error) {
       refreshWarnings.push({
         prop_id: prop.prop_id,
@@ -7965,6 +7982,51 @@ async function gradeBoardResults(
       earned_runs: number | null;
       source: string | null;
     }>();
+
+    // Build 9.6.3: raw_pitcher_game_logs is populated by the bounded game/boxscore
+    // sync and is often fresher than the legacy per-pitcher season endpoint.
+    // Prefer a final local raw line before any game-feed fallback.
+    if (!game || game.strikeouts == null) {
+      const rawFinal = await env.DB.prepare(`
+        SELECT
+          strikeouts,
+          CASE
+            WHEN outs_recorded IS NOT NULL THEN CAST(outs_recorded AS REAL) / 3.0
+            WHEN innings_pitched_text IS NOT NULL THEN
+              CAST(substr(innings_pitched_text, 1, instr(innings_pitched_text || '.', '.') - 1) AS REAL) +
+              CASE substr(innings_pitched_text, instr(innings_pitched_text || '.', '.') + 1, 1)
+                WHEN '1' THEN 1.0 / 3.0
+                WHEN '2' THEN 2.0 / 3.0
+                ELSE 0
+              END
+            ELSE NULL
+          END AS innings_pitched,
+          pitch_count,
+          batters_faced,
+          starter,
+          walks,
+          earned_runs,
+          'MLB Stats API: synced final boxscore' AS source
+        FROM raw_pitcher_game_logs
+        WHERE pitcher_id = ?
+          AND game_date = ?
+          AND strikeouts IS NOT NULL
+          AND lower(COALESCE(game_status, '')) IN ('final', 'game over', 'completed early')
+        ORDER BY starter DESC, pitcher_game_log_id DESC
+        LIMIT 1
+      `).bind(prop.pitcher_id, board.board_date).first<{
+        strikeouts: number | null;
+        innings_pitched: number | null;
+        pitch_count: number | null;
+        batters_faced: number | null;
+        starter: number | null;
+        walks: number | null;
+        earned_runs: number | null;
+        source: string | null;
+      }>();
+
+      if (rawFinal?.strikeouts != null) game = rawFinal;
+    }
 
     const scheduledGame = findPropGame(prop);
 
