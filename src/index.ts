@@ -1270,6 +1270,7 @@ const board = await env.DB.prepare(`
       pr.postgame_review_status,
       pr.graded_at
     FROM props p
+    JOIN boards b ON b.board_id = p.board_id
     JOIN pitchers pi ON pi.pitcher_id = p.pitcher_id
     LEFT JOIN teams t ON t.team_id = p.opponent_team_id
     LEFT JOIN recommendations r
