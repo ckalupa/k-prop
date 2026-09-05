@@ -8408,11 +8408,11 @@ async function autoRefreshPregameBoards(env: Env, scheduledTime: number): Promis
 async function autoGradePreviousBoard(env: Env, scheduledTime: number): Promise<void> {
   const local = chicagoDateParts(scheduledTime);
 
-  // Build 9.6.2: run a small, resumable grading batch every ten minutes from
-  // 6:00 through 10:50 AM America/Chicago. Once the previous board closes,
-  // later cron ticks become cheap no-ops because there is no ACTIVE/ARCHIVED
-  // board left for that date.
-  if (local.hour < 6 || local.hour > 10 || local.minute % 10 !== 0) return;
+  // Build 9.6.4: start the same small, resumable grading batches at 2:00 AM
+  // America/Chicago so overnight boards have time to finish before morning.
+  // Keep the existing ten-minute cadence through 10:50 AM; once the previous
+  // board closes, later cron ticks become cheap no-ops.
+  if (local.hour < 2 || local.hour > 10 || local.minute % 10 !== 0) return;
 
   const boardDate = previousChicagoDate(scheduledTime);
 
