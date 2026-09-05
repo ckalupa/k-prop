@@ -8311,11 +8311,38 @@ async function resolveFinalDnpPropsForBoard(
       const home=normalizedMlbTeamAbbreviation(String(g.home_team??""));
       return (away===pitcherTeam&&home===opponent)||(home===pitcherTeam&&away===opponent);
     });
-    if(matches.length!==1){warnings.push(`prop ${prop.prop_id}: expected one ${pitcherTeam}-${opponent} game, found ${matches.length}`);continue;}
+    let game:Record<string,unknown>|null=null;
+    let reason="";
+    if(matches.length===1){
+      game=matches[0];
+      if(!finalState(game)&&!terminalVoid(game)) continue;
+      reason=terminalVoid(game)?"POSTPONED_OR_CANCELLED":"DNP_OR_STARTER_CHANGE";
+    }else if(matches.length===0){
+      // Build 9.6.5: stale/missing opponent linkage may leave a prior-day prop
+      // orphaned even though the pitcher's actual team game is known. After
+      // 6:00 AM Chicago, allow a VOID only when that team has exactly one game,
+      // that game is terminal, and no pitching appearance exists above.
+      const localNow=chicagoDateParts(Date.now());
+      const teamMatches=games.results.filter((g)=>{
+        const away=normalizedMlbTeamAbbreviation(String(g.away_team??""));
+        const home=normalizedMlbTeamAbbreviation(String(g.home_team??""));
+        return away===pitcherTeam||home===pitcherTeam;
+      });
+      if(localNow.hour<6||teamMatches.length!==1){
+        warnings.push(`prop ${prop.prop_id}: expected one ${pitcherTeam}-${opponent} game, found 0; pitcher-team games=${teamMatches.length}`);
+        continue;
+      }
+      game=teamMatches[0];
+      if(!finalState(game)&&!terminalVoid(game)){
+        warnings.push(`prop ${prop.prop_id}: expected ${pitcherTeam}-${opponent} not found; unique ${pitcherTeam} game is not terminal`);
+        continue;
+      }
+      reason=terminalVoid(game)?"POSTPONED_OR_CANCELLED":"ORPHANED_OPPONENT_LINK_NO_APPEARANCE";
+    }else{
+      warnings.push(`prop ${prop.prop_id}: expected one ${pitcherTeam}-${opponent} game, found ${matches.length}`);
+      continue;
+    }
 
-    const game=matches[0];
-    if(!finalState(game)&&!terminalVoid(game)) continue;
-    const reason=terminalVoid(game)?"POSTPONED_OR_CANCELLED":"DNP_OR_STARTER_CHANGE";
     const source=`MLB Stats API / games table: ${String(game.status_detailed??game.game_status??"terminal")}; ${reason}`;
 
     await env.DB.prepare(`
