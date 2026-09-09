@@ -5783,11 +5783,12 @@ async function applyV14ProductionCalibration(
   modelVersionId:number,
 ):Promise<V14ProductionCalibration|null>{
   const recommendation=await env.DB.prepare(`
-    SELECT recommendation_id,estimated_over_rate,preferred_side,projection_status,score_explanation
+    SELECT recommendation_id,estimated_over_rate,preferred_side,projection_status,score_explanation,
+           confidence_score,confidence_band,recommendation_score,recommendation_band
     FROM recommendations
     WHERE prop_id=? AND model_version_id=?
     LIMIT 1
-  `).bind(prop.prop_id,modelVersionId).first<{recommendation_id:number;estimated_over_rate:number|null;preferred_side:string|null;projection_status:string|null;score_explanation:string|null}>();
+  `).bind(prop.prop_id,modelVersionId).first<{recommendation_id:number;estimated_over_rate:number|null;preferred_side:string|null;projection_status:string|null;score_explanation:string|null;confidence_score:number|null;confidence_band:string|null;recommendation_score:number|null;recommendation_band:string|null}>();
   if(!recommendation) throw new Error(`v14 production recommendation is unavailable for prop ${prop.prop_id}.`);
   const side=normalizePredictionSide(recommendation.preferred_side);
   if(side==='NONE'||recommendation.estimated_over_rate===null)return null;
@@ -5796,26 +5797,22 @@ async function applyV14ProductionCalibration(
   const calibration=await getV14BaselineCalibration(env,prop.board_date,side,rawPreferred);
   const preferred=calibration.calibrated_probability;
   const calibratedMore=side==='MORE'?preferred:1-preferred,calibratedLess=1-calibratedMore;
-  const confidenceScore=Math.round(preferred*1000)/10;
-  const confidenceLabel=preferred>=0.60?'MODERATE':preferred>=0.55?'LEAN':'WATCH';
+  const preservedConfidenceScore=recommendation.confidence_score==null?25:Number(recommendation.confidence_score);
+  const preservedConfidenceLabel=recommendation.confidence_band??'LOW';
   const decision=preferred>=0.54?'PLAY':'WATCH';
   let prior:any={};try{prior=recommendation.score_explanation?JSON.parse(recommendation.score_explanation):{};}catch{prior={legacy_score_explanation:recommendation.score_explanation};}
   const explanation={...prior,v14_production:{policy:'v14-baseline-calibrated-v1',raw_preferred_probability:rawPreferred,calibrated_preferred_probability:preferred,calibration,play_threshold:0.54,board_date:prop.board_date}};
   await env.DB.prepare(`
     UPDATE recommendations
     SET estimated_over_rate=?,
-        confidence_score=?,
-        confidence_band=?,
         decision_tier=?,
         model_decision=?,
         final_decision=?,
-        recommendation_score=?,
-        recommendation_band=?,
         score_explanation=?,
         generated_at=CURRENT_TIMESTAMP
     WHERE recommendation_id=?
-  `).bind(calibratedMore,confidenceScore,confidenceLabel,decision==='PLAY'?'SECONDARY':'WATCH',decision,decision,confidenceScore,decision,JSON.stringify(explanation),recommendation.recommendation_id).run();
-  return {raw_more_probability:rawMore,raw_less_probability:rawLess,calibrated_more_probability:calibratedMore,calibrated_less_probability:calibratedLess,preferred_side:side,decision,confidence_score:confidenceScore,confidence_label:confidenceLabel,calibration};
+  `).bind(calibratedMore,decision==='PLAY'?'SECONDARY':'WATCH',decision,decision,JSON.stringify(explanation),recommendation.recommendation_id).run();
+  return {raw_more_probability:rawMore,raw_less_probability:rawLess,calibrated_more_probability:calibratedMore,calibrated_less_probability:calibratedLess,preferred_side:side,decision,confidence_score:preservedConfidenceScore,confidence_label:preservedConfidenceLabel,calibration};
 }
 
 async function captureV14ProductionPredictionLedger(
