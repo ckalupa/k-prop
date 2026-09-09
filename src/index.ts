@@ -5956,6 +5956,300 @@ async function captureV14BaselinePredictionLedger(
   )));
 }
 
+/* ============================================================================
+ * V15 RESEARCH BUILD 1B - FORWARD SHADOW ONLY
+ *
+ * Frozen research candidates:
+ *   V15-A: strict historical raw OVER -> Platt calibration
+ *   V15-B: restrained regularized rank model -> calibration
+ *
+ * Historical foundation:
+ *   Build 4 strict ARCHIVE_RECONSTRUCTED_A subset, 1054 eligible rows.
+ *
+ * IMPORTANT:
+ *   - SHADOW ONLY
+ *   - no production recommendation mutation
+ *   - no grading mutation
+ *   - no certification/promotion coupling
+ *   - confidence is intentionally NOT reused as a probability
+ * ========================================================================== */
+
+type V15ResearchVariant = "A" | "B";
+
+const V15_A_PLATT = {
+  intercept: 0.05252494,
+  logitRawMore: 0.11648332,
+  datasetBuildId: 4,
+  datasetRows: 1054,
+  coefficientVersion: "v15-a-platt-strict-archive-20260909-v1",
+} as const;
+
+const V15_B_RANK = {
+  intercept: 0.0732548976754971,
+  calibrationIntercept: -0.011807779542937451,
+  calibrationSlope: 1.1604418100073557,
+  datasetBuildId: 4,
+  datasetRows: 1054,
+  coefficientVersion: "v15-b-rank-strict-archive-20260909-v1",
+  featureOrder: [
+    "logit_raw_more","prop_line","model_edge","last_3_k_avg","last_5_k_avg",
+    "last_10_k_avg","average_bf_last_5","average_pitch_count_last_5",
+    "opponent_k_rate","recent_14_k_rate","recent_30_k_rate","handedness_edge",
+  ],
+  mean: [
+    0.17070495945700548,4.875711574952562,0.20343556415631334,
+    5.129348513598993,5.119165085388992,5.094030676786845,
+    22.996394686906992,88.82580645161288,0.22121752484164392,
+    0.2192976898340848,0.21829464843889496,-0.0037844124323794933,
+  ],
+  scale: [
+    0.9879930062980206,1.1055398778672854,0.9843978999588975,
+    1.6697722291559998,1.4246118234486302,1.2265164108077409,
+    2.073366461046721,7.112067014230881,0.02069168922653767,
+    0.034534555083444676,0.025491599380391996,0.020685620980181237,
+  ],
+  coefficient: [
+    -0.031416832249048184,-0.11540220639909966,0.1237325375765879,
+    0.02853922595016441,-0.11006254057818347,0.19203315761482914,
+    -0.12468797423774333,0.09463395274470102,0.007113391435316165,
+    -0.13732379217678647,0.14699424572128356,0.011234138702979783,
+  ],
+} as const;
+
+function v15Logit(p:number):number{
+  const x=clamp(p,0.000001,0.999999);
+  return Math.log(x/(1-x));
+}
+
+function v15Sigmoid(x:number):number{
+  if(x>=0){const z=Math.exp(-x);return 1/(1+z);}
+  const z=Math.exp(x);return z/(1+z);
+}
+
+function v15Round(v:number,digits=6):number{
+  const m=10**digits;
+  return Math.round(v*m)/m;
+}
+
+function v15NumberOrNaN(v:unknown):number{
+  if(v===null || v===undefined || v==="")return Number.NaN;
+  const n=Number(v);
+  return Number.isFinite(n)?n:Number.NaN;
+}
+
+async function captureV15ResearchShadow(
+  env:Env,
+  prop:ProcessPropRow,
+  sourceModelVersionId:number,
+  targetModel:RuntimeModelVersion,
+  propFeatureSnapshotId:number|null,
+  variant:V15ResearchVariant,
+):Promise<void>{
+  const recommendation=await env.DB.prepare(`
+    SELECT recommendation_id,projected_strikeouts,model_edge,estimated_over_rate,
+           preferred_side,projection_status,generated_at
+    FROM recommendations
+    WHERE prop_id=? AND model_version_id=?
+    ORDER BY generated_at DESC,recommendation_id DESC
+    LIMIT 1
+  `).bind(prop.prop_id,sourceModelVersionId).first<{
+    recommendation_id:number;
+    projected_strikeouts:number|null;
+    model_edge:number|null;
+    estimated_over_rate:number|null;
+    preferred_side:string|null;
+    projection_status:string|null;
+    generated_at:string|null;
+  }>();
+
+  if(!recommendation){
+    throw new Error(`V15-${variant} source recommendation unavailable for prop ${prop.prop_id}.`);
+  }
+
+  if(recommendation.estimated_over_rate===null || !Number.isFinite(Number(recommendation.estimated_over_rate))){
+    await env.DB.prepare(`
+      INSERT INTO model_predictions(
+        prediction_uuid,prop_id,model_version_id,prop_feature_snapshot_id,
+        prediction_mode,prediction_status,predicted_at,information_cutoff_at,
+        prop_line,preferred_side,decision,data_quality_status,source_fingerprint,
+        input_hash,output_json,error_message
+      ) VALUES(?,?,?,?,'SHADOW','WITHHELD',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?,
+        'NONE','WITHHELD','PARTIAL',?,?,?,?)
+    `).bind(
+      crypto.randomUUID(),prop.prop_id,targetModel.model_version_id,propFeatureSnapshotId,
+      Number(prop.strikeout_line),
+      `v15-${variant.toLowerCase()}-withheld:${prop.prop_id}:${recommendation.generated_at??'unknown'}`,
+      `${prop.prop_id}:${targetModel.model_version_id}:${recommendation.generated_at??'unknown'}:v15-${variant.toLowerCase()}-missing-raw`,
+      JSON.stringify({
+        adapter:variant==="A"?"v15_a_platt_v1":"v15_b_rank_calibrated_v1",
+        research_only:true,production_unchanged:true,withheld_reason:"RAW_MORE_PROBABILITY_MISSING",
+      }),
+      'Research shadow withheld: raw OVER probability unavailable.',
+    ).run();
+    return;
+  }
+
+  const rawMore=clamp(Number(recommendation.estimated_over_rate),0.000001,0.999999);
+  const rawLess=1-rawMore;
+  const logitRaw=v15Logit(rawMore);
+
+  let calibratedMore:number;
+  let rankScore:number|null=null;
+  let featurePayload:Record<string,unknown>={};
+
+  if(variant==="A"){
+    calibratedMore=v15Sigmoid(V15_A_PLATT.intercept+V15_A_PLATT.logitRawMore*logitRaw);
+    featurePayload={
+      logit_raw_more:v15Round(logitRaw),
+      coefficients:V15_A_PLATT,
+    };
+  }else{
+    const fs=await env.DB.prepare(`
+      SELECT last_3_k_avg,last_5_k_avg,last_10_k_avg,average_bf_last_5,
+             average_pitch_count_last_5,opponent_k_rate,season_opponent_k_rate,
+             recent_30_k_rate,recent_14_k_rate,opponent_trend_delta,
+             opponent_sample_confidence,handedness_edge,snapshot_time
+      FROM feature_snapshots
+      WHERE prop_id=? AND model_version_id=?
+      ORDER BY snapshot_time DESC,feature_snapshot_id DESC
+      LIMIT 1
+    `).bind(prop.prop_id,sourceModelVersionId).first<Record<string,unknown>>();
+
+    const season=Number(String(prop.board_date).slice(0,4))||2026;
+    const matchup=await getOpponentHandedness(
+      env,
+      prop.opponent_team_id,
+      season,
+      prop.throws_hand,
+      prop.board_date,
+    );
+
+    const values=[
+      logitRaw,
+      v15NumberOrNaN(prop.strikeout_line),
+      v15NumberOrNaN(recommendation.model_edge),
+      v15NumberOrNaN(fs?.last_3_k_avg),
+      v15NumberOrNaN(fs?.last_5_k_avg),
+      v15NumberOrNaN(fs?.last_10_k_avg),
+      v15NumberOrNaN(fs?.average_bf_last_5),
+      v15NumberOrNaN(fs?.average_pitch_count_last_5),
+      v15NumberOrNaN(matchup?.opponent_k_rate ?? fs?.opponent_k_rate),
+      v15NumberOrNaN(matchup?.recent_14_k_rate ?? fs?.recent_14_k_rate),
+      v15NumberOrNaN(matchup?.recent_30_k_rate ?? fs?.recent_30_k_rate),
+      v15NumberOrNaN(matchup?.handedness_edge ?? fs?.handedness_edge),
+    ];
+
+    const missing=V15_B_RANK.featureOrder.filter((_,i)=>!Number.isFinite(values[i]));
+    if(missing.length){
+      await env.DB.prepare(`
+        INSERT INTO model_predictions(
+          prediction_uuid,prop_id,model_version_id,prop_feature_snapshot_id,
+          prediction_mode,prediction_status,predicted_at,information_cutoff_at,
+          prop_line,projected_strikeouts,raw_more_probability,raw_less_probability,
+          preferred_side,model_edge,decision,data_quality_status,source_fingerprint,
+          input_hash,output_json,error_message
+        ) VALUES(?,?,?,?,'SHADOW','WITHHELD',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?,?,?,?,?,
+          ?,'WITHHELD','PARTIAL',?,?,?,?)
+      `).bind(
+        crypto.randomUUID(),prop.prop_id,targetModel.model_version_id,propFeatureSnapshotId,
+        Number(prop.strikeout_line),recommendation.projected_strikeouts,rawMore,rawLess,
+        normalizePredictionSide(recommendation.preferred_side),recommendation.model_edge,
+        `v15-b-withheld:${prop.prop_id}:${recommendation.generated_at??'unknown'}`,
+        `${prop.prop_id}:${targetModel.model_version_id}:${recommendation.generated_at??'unknown'}:v15-b-missing-feature`,
+        JSON.stringify({
+          adapter:"v15_b_rank_calibrated_v1",
+          research_only:true,production_unchanged:true,
+          withheld_reason:"REQUIRED_FEATURE_MISSING",
+          missing_features:missing,
+          opponent_team_id:prop.opponent_team_id,
+          pitcher_hand:prop.throws_hand,
+          matchup,
+          feature_snapshot:fs,
+        }),
+        `Research shadow withheld: required V15-B features missing: ${missing.join(', ')}`,
+      ).run();
+      return;
+    }
+
+    rankScore=V15_B_RANK.intercept;
+    const standardized:Record<string,number>={};
+    for(let i=0;i<values.length;i++){
+      const z=(values[i]-V15_B_RANK.mean[i])/V15_B_RANK.scale[i];
+      standardized[V15_B_RANK.featureOrder[i]]=v15Round(z);
+      rankScore+=V15_B_RANK.coefficient[i]*z;
+    }
+
+    calibratedMore=v15Sigmoid(
+      V15_B_RANK.calibrationIntercept+V15_B_RANK.calibrationSlope*rankScore
+    );
+
+    featurePayload={
+      rank_score:v15Round(rankScore),
+      standardized_features:standardized,
+      coefficients:V15_B_RANK,
+      opponent_team_id:prop.opponent_team_id,
+      pitcher_hand:prop.throws_hand,
+      team_hand_measurement:{
+        opponent_k_rate:matchup?.opponent_k_rate??null,
+        season_opponent_k_rate:matchup?.season_opponent_k_rate??null,
+        recent_30_k_rate:matchup?.recent_30_k_rate??null,
+        recent_14_k_rate:matchup?.recent_14_k_rate??null,
+        handedness_edge:matchup?.handedness_edge??null,
+        sample_confidence:matchup?.opponent_sample_confidence??null,
+        plate_appearances:matchup?.plate_appearances??null,
+        strikeouts:matchup?.strikeouts??null,
+        refreshed_at:matchup?.refreshed_at??null,
+      },
+      feature_snapshot_time:fs?.snapshot_time??null,
+    };
+  }
+
+  calibratedMore=clamp(calibratedMore,0.01,0.99);
+  const calibratedLess=1-calibratedMore;
+  const side=calibratedMore>=0.5?"MORE":"LESS";
+  const preferredProbability=Math.max(calibratedMore,calibratedLess);
+  const decision=preferredProbability>=0.54?"PLAY":"WATCH";
+  const dataQualityStatus=recommendation.projection_status==="FULL"?"COMPLETE":"PARTIAL";
+
+  await env.DB.prepare(`
+    INSERT INTO model_predictions(
+      prediction_uuid,prop_id,model_version_id,prop_feature_snapshot_id,
+      prediction_mode,prediction_status,predicted_at,information_cutoff_at,
+      prop_line,projected_strikeouts,raw_more_probability,raw_less_probability,
+      calibrated_more_probability,calibrated_less_probability,preferred_side,
+      model_edge,decision,confidence_score,confidence_label,data_quality_status,
+      source_fingerprint,input_hash,output_json
+    ) VALUES(?,?,?,?,'SHADOW','COMPLETE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,
+      ?,?,?,?,?,?,?,?,?,NULL,'RESEARCH_ONLY',?,?,?,?)
+  `).bind(
+    crypto.randomUUID(),prop.prop_id,targetModel.model_version_id,propFeatureSnapshotId,
+    Number(prop.strikeout_line),recommendation.projected_strikeouts,rawMore,rawLess,
+    calibratedMore,calibratedLess,side,
+    variant==="B"&&rankScore!==null?rankScore:recommendation.model_edge,
+    decision,dataQualityStatus,
+    `v15-${variant.toLowerCase()}:${prop.prop_id}:${sourceModelVersionId}:${recommendation.generated_at??'unknown'}`,
+    `${prop.prop_id}:${targetModel.model_version_id}:${recommendation.generated_at??'unknown'}:v15-${variant.toLowerCase()}-research-v1`,
+    JSON.stringify({
+      adapter:variant==="A"?"v15_a_platt_v1":"v15_b_rank_calibrated_v1",
+      research_only:true,
+      production_unchanged:true,
+      historical_dataset:{dataset_build_id:4,strict_archive_rows:1054},
+      source_model_version_id:sourceModelVersionId,
+      target_model_version_id:targetModel.model_version_id,
+      source_recommendation_id:recommendation.recommendation_id,
+      raw_more_probability:rawMore,
+      calibrated_more_probability:calibratedMore,
+      preferred_probability:preferredProbability,
+      feature_payload:featurePayload,
+      rules:{
+        direction_from_calibrated_over_probability:true,
+        play_threshold:0.54,
+        confidence_not_probability:true,
+        forward_shadow_only:true,
+      },
+    }),
+  ).run();
+}
 async function recordShadowFailure(
   env: Env,
   prop: ProcessPropRow,
@@ -6308,6 +6602,10 @@ async function processBoard(
             await capturePredictionLedger(env, prop, sourceModelVersionId, challenger, "SHADOW", propFeatureSnapshotId);
           } else if (challenger.code_identifier === "shadow-adapter:v14-baseline-calibrated-v1" || challenger.code_identifier === "shadow-adapter:v14-adaptive-selection-v1") {
             await captureV14BaselinePredictionLedger(env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId);
+          } else if (challenger.code_identifier === "shadow-adapter:v15-a-platt-v1") {
+            await captureV15ResearchShadow(env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId, "A");
+          } else if (challenger.code_identifier === "shadow-adapter:v15-b-rank-calibrated-v1") {
+            await captureV15ResearchShadow(env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId, "B");
           } else {
             throw new Error(`Unsupported shadow adapter: ${challenger.code_identifier ?? "none"}`);
           }
