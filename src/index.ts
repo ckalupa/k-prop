@@ -5974,7 +5974,7 @@ async function captureV14BaselinePredictionLedger(
  *   - confidence is intentionally NOT reused as a probability
  * ========================================================================== */
 
-type V15ResearchVariant = "A" | "B";
+type V15ResearchVariant = "A" | "B" | "C";
 
 const V15_A_PLATT = {
   intercept: 0.05252494,
@@ -6180,11 +6180,16 @@ async function captureV15ResearchShadow(
     }
 
     calibratedMore=v15Sigmoid(
-      V15_B_RANK.calibrationIntercept+V15_B_RANK.calibrationSlope*rankScore
+      variant==="C"
+        ? -0.047982456577369235 + 0.3782186491890524*rankScore
+        : V15_B_RANK.calibrationIntercept+V15_B_RANK.calibrationSlope*rankScore
     );
 
     featurePayload={
       rank_score:v15Round(rankScore),
+      rank_calibration:variant==="C"
+        ? {kind:"PLATT_FORWARD_20260909_20260919",intercept:-0.047982456577369235,slope:0.3782186491890524}
+        : {kind:"V15_B_ORIGINAL",intercept:V15_B_RANK.calibrationIntercept,slope:V15_B_RANK.calibrationSlope},
       standardized_features:standardized,
       coefficients:V15_B_RANK,
       opponent_team_id:prop.opponent_team_id,
@@ -6606,6 +6611,8 @@ async function processBoard(
             await captureV15ResearchShadow(env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId, "A");
           } else if (challenger.code_identifier === "shadow-adapter:v15-b-rank-calibrated-v1") {
             await captureV15ResearchShadow(env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId, "B");
+          } else if (challenger.code_identifier === "shadow-adapter:v15-c-rank-forward-platt-v1") {
+            await captureV15ResearchShadow(env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId, "C");
           } else {
             throw new Error(`Unsupported shadow adapter: ${challenger.code_identifier ?? "none"}`);
           }
