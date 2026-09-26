@@ -8516,18 +8516,6 @@ async function gradeBoardResults(
   });
 }
 
-async function gradeBoardResultsBatch(
-  env: Env,
-  identity: AccessIdentity,
-  boardId: number,
-): Promise<Response> {
-  // Manual recovery path intentionally mirrors the cron grader:
-  // resolve final DNP/starter-change cases first, then grade at most six
-  // pending props so one request cannot fan out across an entire board.
-  await resolveFinalDnpPropsForBoard(env, boardId);
-  return gradeBoardResults(env, identity, boardId, 6);
-}
-
 function chicagoDateParts(timestamp: number): { year: number; month: number; day: number; hour: number; minute: number } {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Chicago",
@@ -13026,12 +13014,6 @@ export default {
       if (processMatch && request.method === "POST") {
         return processBoard(env, identity!, Number(processMatch[1]));
       }
-
-      const gradeResultsBatchMatch = url.pathname.match(/^\/api\/boards\/(\d+)\/grade-results-batch$/);
-      if (gradeResultsBatchMatch && request.method === "POST") {
-        return gradeBoardResultsBatch(env, identity!, Number(gradeResultsBatchMatch[1]));
-      }
-
       const gradeResultsMatch = url.pathname.match(/^\/api\/boards\/(\d+)\/grade-results$/);
       if (gradeResultsMatch && request.method === "POST") {
         return gradeBoardResults(env, identity!, Number(gradeResultsMatch[1]));
