@@ -183,3 +183,9 @@ seed/0001_tracker_data.sql
 
 # Local editor settings
 .vscode/
+
+# K-Prop local audit / backup artifacts
+.kprop-audits/
+.kprop-backups/
+.kprop-v15-preview/
+MLB-grade-batch-route-*.txt
