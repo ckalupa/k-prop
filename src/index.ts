@@ -6255,6 +6255,325 @@ async function captureV15ResearchShadow(
     }),
   ).run();
 }
+/* ============================================================================
+ * K-PROP 2027 V16 RESEARCH SHADOWS - CORRECTED RAW V14 INPUT PATH
+ *
+ * IMPORTANT:
+ * applyV14ProductionCalibration() mutates recommendations.estimated_over_rate.
+ * Therefore V16 must NOT reread that field as its raw V14 probability.
+ * processBoard passes v14ProductionCalibration.raw_more_probability directly.
+ *
+ * V16-A:
+ *   pA = 0.50 + 0.16386188304480287 * (pRawV14 - 0.50)
+ *
+ * V16-B:
+ *   pRawF = sigmoid(intercept + sum(coef_i * z_i))
+ *   pB    = 0.85 * pA + 0.15 * pRawF
+ *
+ * Frozen 2026 research candidates. SHADOW ONLY.
+ * ========================================================================== */
+
+const V16_A_SHRINK = {
+  alpha: 0.16386188304480287,
+  datasetBuildId: 4,
+  trainingRows: 1054,
+  coefficientVersion: "v16-a-v14-shrink-build4-full2026-v1",
+} as const;
+
+async function captureV16AShrinkShadow(
+  env:Env,
+  prop:ProcessPropRow,
+  sourceModelVersionId:number,
+  targetModel:RuntimeModelVersion,
+  propFeatureSnapshotId:number|null,
+  rawSourceMore:number|null,
+):Promise<void>{
+  const recommendation=await env.DB.prepare(`
+    SELECT recommendation_id,projected_strikeouts,model_edge,preferred_side,
+           projection_status,generated_at
+    FROM recommendations
+    WHERE prop_id=? AND model_version_id=?
+    ORDER BY generated_at DESC,recommendation_id DESC
+    LIMIT 1
+  `).bind(prop.prop_id,sourceModelVersionId).first<Record<string,unknown>>();
+
+  if(!recommendation)throw new Error(`V16-A source recommendation unavailable for prop ${prop.prop_id}.`);
+
+  if(rawSourceMore===null || !Number.isFinite(Number(rawSourceMore))){
+    await env.DB.prepare(`
+      INSERT INTO model_predictions(
+        prediction_uuid,prop_id,model_version_id,prop_feature_snapshot_id,
+        prediction_mode,prediction_status,predicted_at,information_cutoff_at,
+        prop_line,preferred_side,decision,data_quality_status,source_fingerprint,
+        input_hash,output_json,error_message
+      ) VALUES(?,?,?,?,'SHADOW','WITHHELD',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?,
+        'NONE','WITHHELD','PARTIAL',?,?,?,?)
+    `).bind(
+      crypto.randomUUID(),prop.prop_id,targetModel.model_version_id,propFeatureSnapshotId,
+      Number(prop.strikeout_line),
+      `v16-a-withheld:${prop.prop_id}:${String(recommendation.generated_at??"unknown")}`,
+      `${prop.prop_id}:${targetModel.model_version_id}:v16-a-missing-precalibration-raw`,
+      JSON.stringify({
+        adapter:"v16_a_v14_shrink_v1",
+        research_only:true,
+        production_unchanged:true,
+        raw_probability_source:"v14ProductionCalibration.raw_more_probability",
+        withheld_reason:"PRECALIBRATION_RAW_MORE_UNAVAILABLE",
+      }),
+      "Research shadow withheld: pre-calibration V14 raw OVER probability unavailable.",
+    ).run();
+    return;
+  }
+
+  const rawMore=clamp(Number(rawSourceMore),0.000001,0.999999);
+  const rawLess=1-rawMore;
+  const calibratedMore=clamp(0.5+V16_A_SHRINK.alpha*(rawMore-0.5),0.01,0.99);
+  const calibratedLess=1-calibratedMore;
+  const sourceSide=normalizePredictionSide(String(recommendation.preferred_side??""));
+  const side=sourceSide==="NONE"?(rawMore>=0.5?"MORE":"LESS"):sourceSide;
+  const preferredProbability=side==="MORE"?calibratedMore:calibratedLess;
+  const decision=preferredProbability>=0.54?"PLAY":"WATCH";
+  const dataQualityStatus=String(recommendation.projection_status??"")==="FULL"?"COMPLETE":"PARTIAL";
+
+  await env.DB.prepare(`
+    INSERT INTO model_predictions(
+      prediction_uuid,prop_id,model_version_id,prop_feature_snapshot_id,
+      prediction_mode,prediction_status,predicted_at,information_cutoff_at,
+      prop_line,projected_strikeouts,raw_more_probability,raw_less_probability,
+      calibrated_more_probability,calibrated_less_probability,preferred_side,
+      model_edge,decision,confidence_score,confidence_label,data_quality_status,
+      source_fingerprint,input_hash,output_json
+    ) VALUES(?,?,?,?,'SHADOW','COMPLETE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,
+      ?,?,?,?,?,?,?,?,?,NULL,'RESEARCH_ONLY',?,?,?,?)
+  `).bind(
+    crypto.randomUUID(),prop.prop_id,targetModel.model_version_id,propFeatureSnapshotId,
+    Number(prop.strikeout_line),recommendation.projected_strikeouts,rawMore,rawLess,
+    calibratedMore,calibratedLess,side,recommendation.model_edge,decision,dataQualityStatus,
+    `v16-a:${prop.prop_id}:${sourceModelVersionId}:${String(recommendation.generated_at??"unknown")}`,
+    `${prop.prop_id}:${targetModel.model_version_id}:${String(recommendation.generated_at??"unknown")}:v16-a-v14-shrink-v1`,
+    JSON.stringify({
+      adapter:"v16_a_v14_shrink_v1",
+      research_only:true,
+      production_unchanged:true,
+      raw_probability_source:"v14ProductionCalibration.raw_more_probability",
+      source_model_version_id:sourceModelVersionId,
+      target_model_version_id:targetModel.model_version_id,
+      source_recommendation_id:recommendation.recommendation_id,
+      raw_more_probability:rawMore,
+      calibrated_more_probability:calibratedMore,
+      preferred_probability:preferredProbability,
+      coefficient:V16_A_SHRINK,
+      rules:{preserve_source_direction:true,play_threshold:0.54,forward_shadow_only:true,fixed_2026_fit:true},
+    }),
+  ).run();
+}
+
+const V16_B_RAW_LOGISTIC = {
+  intercept:0.074012527988197047,
+  datasetBuildId:4,
+  trainingRows:1054,
+  coefficientVersion:"v16-b-raw-logistic-build4-full2026-v1",
+  blendV16AWeight:0.85,
+  blendRawLogisticWeight:0.15,
+  v16AShrinkAlpha:0.16386188304480287,
+  feature: [
+    {name:"prop_line",mean:4.8757115749525619,scale:1.1055398778672911,coefficient:-0.22944950323998509},
+    {name:"prior_start_count",mean:11.40607210626186,scale:3.6346687633770181,coefficient:-0.075111453210921858},
+    {name:"last3_k_avg",mean:5.1293485135989876,scale:1.6697722291560004,coefficient:0.13729982090819398},
+    {name:"last5_k_avg",mean:5.1191650853889943,scale:1.4246118234486271,coefficient:-0.094588490630467661},
+    {name:"last10_k_avg",mean:5.0940306767868444,scale:1.2265164108077395,coefficient:0.2236186291146893},
+    {name:"last5_k_per_bf",mean:0.222625352095004,scale:0.058153183828472219,coefficient:-0.032427297910908259},
+    {name:"last5_avg_bf",mean:22.996394686907017,scale:2.0733664610467208,coefficient:-0.25111175935926661},
+    {name:"last5_avg_ip",mean:5.4695762175838079,scale:0.66842901913015029,coefficient:0.1404650000124166},
+    {name:"last5_avg_pitch_count",mean:88.825806451612891,scale:7.1120670142308793,coefficient:0.13843599111371141},
+    {name:"form_delta_l3_l10",mean:0.035317836812144336,scale:1.0457446173587959,coefficient:-0.043043482704774573},
+    {name:"opp_window7_pa",mean:138.72770398481973,scale:53.405477434112562,coefficient:0.27938363695963431},
+    {name:"opp_window7_k_rate",mean:0.22024512140220737,scale:0.050270423840390627,coefficient:0.32479800479366894},
+    {name:"opp_window14_pa",mean:279.52656546489561,scale:94.603139684204422,coefficient:-0.4309972764604485},
+    {name:"opp_window14_k_rate",mean:0.21929768983408462,scale:0.034534555083444655,coefficient:-0.082104571150958053},
+    {name:"opp_window30_pa",mean:602.64231499051232,scale:196.05797305306629,coefficient:-0.16448907562080436},
+    {name:"opp_window30_k_rate",mean:0.21829464843889482,scale:0.025491599380391979,coefficient:0.23120871492913569},
+    {name:"weighted_recent_k_rate",mean:0.22121752484164411,scale:0.020691689226537646,coefficient:-0.3693948579396345},
+    {name:"pitcher_hand_L",mean:0.25426944971537002,scale:0.43544976364307852,coefficient:-0.31473703477649984},
+  ],
+} as const;
+
+function v16BSigmoid(x:number):number{
+  if(x>=0){const z=Math.exp(-x);return 1/(1+z);}
+  const z=Math.exp(x);return z/(1+z);
+}
+function v16BNumber(v:unknown):number{
+  if(v===null||v===undefined||v==="")return Number.NaN;
+  const n=Number(v); return Number.isFinite(n)?n:Number.NaN;
+}
+
+async function captureV16BBlendShadow(
+  env:Env,
+  prop:ProcessPropRow,
+  sourceModelVersionId:number,
+  targetModel:RuntimeModelVersion,
+  propFeatureSnapshotId:number|null,
+  rawSourceMore:number|null,
+):Promise<void>{
+  const recommendation=await env.DB.prepare(`
+    SELECT recommendation_id,projected_strikeouts,model_edge,preferred_side,
+           projection_status,generated_at
+    FROM recommendations
+    WHERE prop_id=? AND model_version_id=?
+    ORDER BY generated_at DESC,recommendation_id DESC
+    LIMIT 1
+  `).bind(prop.prop_id,sourceModelVersionId).first<Record<string,unknown>>();
+  if(!recommendation)throw new Error(`V16-B source recommendation unavailable for prop ${prop.prop_id}.`);
+
+  if(rawSourceMore===null || !Number.isFinite(Number(rawSourceMore)) || propFeatureSnapshotId===null){
+    await env.DB.prepare(`
+      INSERT INTO model_predictions(
+        prediction_uuid,prop_id,model_version_id,prop_feature_snapshot_id,
+        prediction_mode,prediction_status,predicted_at,information_cutoff_at,
+        prop_line,preferred_side,decision,data_quality_status,source_fingerprint,
+        input_hash,output_json,error_message
+      ) VALUES(?,?,?,?,'SHADOW','WITHHELD',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?,
+        'NONE','WITHHELD','PARTIAL',?,?,?,?)
+    `).bind(
+      crypto.randomUUID(),prop.prop_id,targetModel.model_version_id,propFeatureSnapshotId,
+      Number(prop.strikeout_line),
+      `v16-b-withheld:${prop.prop_id}:${String(recommendation.generated_at??"unknown")}`,
+      `${prop.prop_id}:${targetModel.model_version_id}:v16-b-missing-input`,
+      JSON.stringify({
+        adapter:"v16_b_calibrated_raw_blend_v1",
+        research_only:true,
+        production_unchanged:true,
+        raw_probability_source:"v14ProductionCalibration.raw_more_probability",
+        withheld_reason:propFeatureSnapshotId===null?"PROP_FEATURE_SNAPSHOT_MISSING":"PRECALIBRATION_RAW_MORE_UNAVAILABLE",
+      }),
+      "Research shadow withheld: required V16-B input unavailable.",
+    ).run();
+    return;
+  }
+
+  const snap=await env.DB.prepare(`
+    SELECT prop_line,pitcher_hand,pitcher_features_json,team_features_json,snapshot_status,quality_gate
+    FROM prop_feature_snapshots
+    WHERE prop_feature_snapshot_id=?
+    LIMIT 1
+  `).bind(propFeatureSnapshotId).first<Record<string,unknown>>();
+  if(!snap)throw new Error(`V16-B feature snapshot unavailable for prop ${prop.prop_id}.`);
+
+  let pf:Record<string,unknown>={},tf:Record<string,unknown>={};
+  try{pf=snap.pitcher_features_json?JSON.parse(String(snap.pitcher_features_json)):{};}catch{pf={};}
+  try{tf=snap.team_features_json?JSON.parse(String(snap.team_features_json)):{};}catch{tf={};}
+
+  const last3=v16BNumber(pf.last3_avg_strikeouts);
+  const last10=v16BNumber(pf.last10_avg_strikeouts);
+  const values:Record<string,number>={
+    prop_line:v16BNumber(snap.prop_line),
+    prior_start_count:v16BNumber(pf.season_starts),
+    last3_k_avg:last3,
+    last5_k_avg:v16BNumber(pf.last5_avg_strikeouts),
+    last10_k_avg:last10,
+    last5_k_per_bf:v16BNumber(pf.last5_k_per_bf),
+    last5_avg_bf:v16BNumber(pf.last5_avg_batters_faced),
+    last5_avg_ip:v16BNumber(pf.last5_avg_innings),
+    last5_avg_pitch_count:v16BNumber(pf.last5_avg_pitch_count),
+    form_delta_l3_l10:Number.isFinite(last3)&&Number.isFinite(last10)?last3-last10:Number.NaN,
+    opp_window7_pa:v16BNumber(tf.last7_plate_appearances),
+    opp_window7_k_rate:v16BNumber(tf.last7_k_rate),
+    opp_window14_pa:v16BNumber(tf.last14_plate_appearances),
+    opp_window14_k_rate:v16BNumber(tf.last14_k_rate),
+    opp_window30_pa:v16BNumber(tf.last30_plate_appearances),
+    opp_window30_k_rate:v16BNumber(tf.last30_k_rate),
+    weighted_recent_k_rate:v16BNumber(tf.weighted_recent_k_rate),
+    pitcher_hand_L:String(snap.pitcher_hand??"").toUpperCase()==="L"?1:0,
+  };
+
+  const missing=V16_B_RAW_LOGISTIC.feature.map(x=>x.name).filter(name=>!Number.isFinite(values[name]));
+  if(missing.length){
+    await env.DB.prepare(`
+      INSERT INTO model_predictions(
+        prediction_uuid,prop_id,model_version_id,prop_feature_snapshot_id,
+        prediction_mode,prediction_status,predicted_at,information_cutoff_at,
+        prop_line,preferred_side,decision,data_quality_status,source_fingerprint,
+        input_hash,output_json,error_message
+      ) VALUES(?,?,?,?,'SHADOW','WITHHELD',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?,
+        'NONE','WITHHELD','PARTIAL',?,?,?,?)
+    `).bind(
+      crypto.randomUUID(),prop.prop_id,targetModel.model_version_id,propFeatureSnapshotId,
+      Number(prop.strikeout_line),
+      `v16-b-withheld:${prop.prop_id}:${String(recommendation.generated_at??"unknown")}`,
+      `${prop.prop_id}:${targetModel.model_version_id}:v16-b-missing-feature`,
+      JSON.stringify({
+        adapter:"v16_b_calibrated_raw_blend_v1",
+        research_only:true,
+        production_unchanged:true,
+        raw_probability_source:"v14ProductionCalibration.raw_more_probability",
+        withheld_reason:"REQUIRED_FEATURE_MISSING",
+        missing_features:missing,
+      }),
+      `Research shadow withheld: required V16-B features missing: ${missing.join(", ")}`,
+    ).run();
+    return;
+  }
+
+  let score=V16_B_RAW_LOGISTIC.intercept;
+  const standardized:Record<string,number>={};
+  for(const f of V16_B_RAW_LOGISTIC.feature){
+    const z=(values[f.name]-f.mean)/f.scale;
+    standardized[f.name]=z;
+    score+=f.coefficient*z;
+  }
+
+  const rawMore=clamp(Number(rawSourceMore),0.000001,0.999999);
+  const rawFeatureMore=v16BSigmoid(score);
+  const v16AMore=clamp(0.5+V16_B_RAW_LOGISTIC.v16AShrinkAlpha*(rawMore-0.5),0.01,0.99);
+  const blendedMore=clamp(
+    V16_B_RAW_LOGISTIC.blendV16AWeight*v16AMore+
+    V16_B_RAW_LOGISTIC.blendRawLogisticWeight*rawFeatureMore,
+    0.01,0.99
+  );
+  const blendedLess=1-blendedMore;
+  const side=blendedMore>=0.5?"MORE":"LESS";
+  const preferredProbability=Math.max(blendedMore,blendedLess);
+  const decision=preferredProbability>=0.54?"PLAY":"WATCH";
+
+  await env.DB.prepare(`
+    INSERT INTO model_predictions(
+      prediction_uuid,prop_id,model_version_id,prop_feature_snapshot_id,
+      prediction_mode,prediction_status,predicted_at,information_cutoff_at,
+      prop_line,projected_strikeouts,raw_more_probability,raw_less_probability,
+      calibrated_more_probability,calibrated_less_probability,preferred_side,
+      model_edge,decision,confidence_score,confidence_label,data_quality_status,
+      source_fingerprint,input_hash,output_json
+    ) VALUES(?,?,?,?,'SHADOW','COMPLETE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,
+      ?,?,?,?,?,?,?,?,?,NULL,'RESEARCH_ONLY',?,?,?,?)
+  `).bind(
+    crypto.randomUUID(),prop.prop_id,targetModel.model_version_id,propFeatureSnapshotId,
+    Number(prop.strikeout_line),recommendation.projected_strikeouts,
+    rawMore,1-rawMore,blendedMore,blendedLess,side,recommendation.model_edge,decision,
+    String(snap.snapshot_status??"PARTIAL"),
+    `v16-b:${prop.prop_id}:${sourceModelVersionId}:${String(recommendation.generated_at??"unknown")}`,
+    `${prop.prop_id}:${targetModel.model_version_id}:v16-b-calibrated-raw-blend-v1`,
+    JSON.stringify({
+      adapter:"v16_b_calibrated_raw_blend_v1",
+      research_only:true,
+      production_unchanged:true,
+      raw_probability_source:"v14ProductionCalibration.raw_more_probability",
+      source_model_version_id:sourceModelVersionId,
+      target_model_version_id:targetModel.model_version_id,
+      source_recommendation_id:recommendation.recommendation_id,
+      source_raw_more_probability:rawMore,
+      v16a_more_probability:v16AMore,
+      raw_feature_more_probability:rawFeatureMore,
+      blended_more_probability:blendedMore,
+      raw_feature_score:score,
+      standardized_features:standardized,
+      coefficient_spec:V16_B_RAW_LOGISTIC,
+      snapshot_status:snap.snapshot_status??null,
+      quality_gate:snap.quality_gate??null,
+      rules:{play_threshold:0.54,forward_shadow_only:true,fixed_2026_fit:true},
+    })
+  ).run();
+}
+
 async function recordShadowFailure(
   env: Env,
   prop: ProcessPropRow,
@@ -6613,7 +6932,16 @@ async function processBoard(
             await captureV15ResearchShadow(env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId, "B");
           } else if (challenger.code_identifier === "shadow-adapter:v15-c-rank-forward-platt-v1") {
             await captureV15ResearchShadow(env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId, "C");
-          } else {
+          } else if (challenger.code_identifier === "shadow-adapter:v16-a-v14-shrink-v1") {
+            await captureV16AShrinkShadow(
+              env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId,
+              v14ProductionCalibration?.raw_more_probability ?? null,
+            );
+          } else if (challenger.code_identifier === "shadow-adapter:v16-b-calibrated-raw-blend-v1") {
+            await captureV16BBlendShadow(
+              env, prop, sourceModelVersionId, challenger, propFeatureSnapshotId,
+              v14ProductionCalibration?.raw_more_probability ?? null,
+            );          } else {
             throw new Error(`Unsupported shadow adapter: ${challenger.code_identifier ?? "none"}`);
           }
           shadowPredictions += 1;
