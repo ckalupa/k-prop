@@ -7,23 +7,32 @@ import {
 import { describe, it, expect } from "vitest";
 import worker from "../src/index";
 
-// For now, you'll need to do something like this to get a correctly-typed
-// `Request` to pass to `worker.fetch()`.
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
-describe("Hello World worker", () => {
-	it("responds with Hello World! (unit style)", async () => {
-		const request = new IncomingRequest("http://example.com");
-		// Create an empty context to pass to `worker.fetch()`.
+function expectDailyBoardHtml(response: Response, body: string) {
+	expect(response.status).toBe(200);
+	expect(response.headers.get("content-type") ?? "").toContain("text/html");
+	expect(body).toContain("<title>K-Prop Demon Hunters</title>");
+	expect(body).toContain("<h1>Daily Board</h1>");
+	expect(body).toContain('id="board-body"');
+	expect(body).toContain('<script src="/app.js" defer></script>');
+}
+
+describe("K-Prop Daily Board worker", () => {
+	it("serves the Daily Board HTML (unit style)", async () => {
+		const request = new IncomingRequest("http://example.com/");
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, env, ctx);
-		// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
+		const body = await response.text();
 		await waitOnExecutionContext(ctx);
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+
+		expectDailyBoardHtml(response, body);
 	});
 
-	it("responds with Hello World! (integration style)", async () => {
-		const response = await SELF.fetch("https://example.com");
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+	it("serves the Daily Board HTML (integration style)", async () => {
+		const response = await SELF.fetch("https://example.com/");
+		const body = await response.text();
+
+		expectDailyBoardHtml(response, body);
 	});
 });
